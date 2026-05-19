@@ -1,0 +1,63 @@
+{
+  "name": "Instagram",
+  "platformUrl": "https://www.instagram.com/",
+  "description": "Instagram is a photo and video sharing social networking service owned by Meta Platforms.",
+  "author": "Freeb",
+  "authorUrl": "https://github.com/b-risk/Grayjay-Instagram",
+  "sourceUrl": "https://raw.githubusercontent.com/b-risk/Grayjay-Instagram/refs/heads/main/InstagramConfig.json",
+  "scriptUrl": "./InstagramScript.js",
+  "repositoryUrl": "https://github.com/b-risk/Grayjay-Instagram",
+  "version": 1,
+  "iconUrl": "./Imgs/InstagramIcon.png",
+  "id": "859124b7-b79e-4340-b8a0-a1360a2bc939",
+  "scriptSignature": "",
+  "scriptPublicKey": "",
+  "packages": [
+    "Http",
+    "Utilities",
+    "DOMParser"
+  ],
+  "allowEval": false,
+  "allowAllHttpHeaderAccess": true,
+  "allowUrls": [
+    "instagram.com",
+    ".instagram.com",
+    ".cdninstagram.com",
+    ".fbcdn.net",
+    "kittygr.am",
+    "kittygram.irelephant.net",
+    "kittygram.nexussfan.cz",
+    "kittygram.kareem.one",
+    "kg.lus.lu",
+    "kg.meowing.de"
+  ],
+  "changelog": {
+    "1": [
+      "Initial release"
+    ]
+  },
+  "settings": [
+    {
+      "variable": "useInstagramUrlsForSharing",
+      "name": "Use Instagram URLs for Sharing",
+      "description": "When enabled, share links will use Instagram URLs instead of Kittygram URLs.",
+      "type": "Boolean",
+      "default": "false"
+    },
+    {
+      "variable": "kittygramInstance",
+      "name": "Preferred Kittygram Instance",
+      "description": "Preferred Kittygram instance for fetching content. Falls back to other instances if this one fails.",
+      "type": "Dropdown",
+      "default": "0",
+      "options": [
+        "kittygram.irelephant.net (Fast)",
+        "kittygr.am",
+        "kittygram.kareem.one (Singapore)",
+        "kg.lus.lu (Luxembourg)",
+        "kg.meowing.de (Germany)",
+        "kittygram.nexussfan.cz (Czech)"
+      ]
+    }
+  ]
+}
