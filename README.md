@@ -11,7 +11,7 @@ You can install the plugin by scanning this QR code:
 
 Alternatively, you can add it manually by using this link:
 ```
-grayjay://plugin/https://raw.githubusercontent.com/username/Grayjay-Instagram/main/InstagramConfig.json
+grayjay://plugin/https://raw.githubusercontent.com/b-risk/Grayjay-Instagram/main/InstagramConfig.json
 ```
 
 ### Features
