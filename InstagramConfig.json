@@ -10,8 +10,8 @@
   "version": 1,
   "iconUrl": "./Imgs/InstagramIcon.png",
   "id": "859124b7-b79e-4340-b8a0-a1360a2bc939",
-  "scriptSignature": "",
-  "scriptPublicKey": "",
+  "scriptSignature": "C1mTqaiMIuL6X778jCvovfc2t+jp+vQOU2PUSkhiYpL5M6TUf99Q3n/IvOYifUm8eTZTDcOsqrn4JebKbGngNkqACJg61oi/L1sP9zl3Ko4H6FbqbYiNLTYihGfssFcB2BZmpfiwnpaf9K966vbccdKT75Cg4xzuiu5IkzZn4bTtCXkGdF/OnCzUdjVpCB1A+gaLvBY7+VQsY2vRQj4YNwtQG19ob9h0m7KvvppilKbRNZE9BJRSM4aN7dc5ONbnA9J3qvsNFbQnyk2eEZJSRb2uTJPHt+m9ELoRSrjleNyx/t55k9ny2IBccqVGzPMoMtaNwF81aIzUmZl+MhyRow==",
+  "scriptPublicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzqO5lakY+6LDum8qWCfjLe8TBifJvxVxQ8PXDfiKY4/9REShniiayh4x2Bhf7FN4iNg7b7TE4rXbGkzyMVNW+JRpw+UexYd5eqdwIJTSF6H+7F6wOWKi6bWxkPnKxGe4mOfamEKn+FJwkJ56qTpM4SZ4EDjyJaKjIOkMC0KgpqH9FpuYibwknBF2+7f7N4rUQgGKRR6nKbMdFjKOkHiRswhTFKzKJE8YjeVhu97jFhQIEOSawdwrcG8dCqsVz6VYtACN3xfewiUAF/04HJRGPb0dm3QsQzbSaBu0D5pN1LV3z7Tlq7yCCHhuenusEovPwCVOWJ/dyaQFFer3Mqw8uwIDAQAB",
   "packages": [
     "Http",
     "Utilities",

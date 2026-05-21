@@ -1,56 +1,29 @@
-#!/bin/bash
-# Sign a Grayjay plugin script and embed the signature into its config.
-# Usage: sh ./sign-script.sh <script.js> <config.json>
+#!/bin/sh
 
-if [ $# -lt 2 ]; then
-    echo "Usage: $0 <script.js> <config.json>"
-    exit 1
+# Parameters
+JS_FILE_PATH=$1
+CONFIG_FILE_PATH=$2
+
+# Decode and save the private key to a temporary file
+echo "$SIGNING_PRIVATE_KEY" | base64 -d > tmp_private_key.pem
+
+# Validate private key
+if ! openssl rsa -check -noout -in tmp_private_key.pem > /dev/null 2>&1; then
+  echo "Invalid private key."
+  rm tmp_private_key.pem
+  exit 1
 fi
 
-SCRIPT_FILE="$1"
-CONFIG_FILE="$2"
+# Generate signature for the provided JS file
+SIGNATURE=$(cat $JS_FILE_PATH | openssl dgst -sha512 -sign tmp_private_key.pem | base64 -w 0)
 
-if [ ! -f "$SCRIPT_FILE" ]; then
-    echo "Error: Script file '$SCRIPT_FILE' not found."
-    exit 1
-fi
+# Extract public key from the temporary private key file
+PUBLIC_KEY=$(openssl rsa -pubout -outform DER -in tmp_private_key.pem 2>/dev/null | openssl pkey -pubin -inform DER -outform PEM | tail -n +2 | head -n -1 | tr -d '\n')
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Error: Config file '$CONFIG_FILE' not found."
-    exit 1
-fi
+echo "PUBLIC_KEY: $PUBLIC_KEY"
 
-if [ -z "$SIGNING_PRIVATE_KEY" ]; then
-    echo "Error: SIGNING_PRIVATE_KEY environment variable not set."
-    echo "Generate a key: ssh-keygen -t rsa -b 2048 -m PEM -f ./private-key.pem"
-    echo "Export it: export SIGNING_PRIVATE_KEY=\"\$(base64 -w 0 ./private-key.pem)\""
-    exit 1
-fi
+# Remove temporary key files
+rm tmp_private_key.pem
 
-echo "$SIGNING_PRIVATE_KEY" | base64 -d > /tmp/grayjay_signing_key.pem
-
-SIGNATURE=$(echo -n "$(cat "$SCRIPT_FILE")" | openssl dgst -sha512 -sign /tmp/grayjay_signing_key.pem | base64 -w 0)
-
-rm -f /tmp/grayjay_signing_key.pem
-
-if [ -z "$SIGNATURE" ]; then
-    echo "Error: Failed to generate signature."
-    exit 1
-fi
-
-# Extract public key
-echo "$SIGNING_PRIVATE_KEY" | base64 -d > /tmp/grayjay_pubkey.pem
-PUBLIC_KEY=$(openssl pkey -in /tmp/grayjay_pubkey.pem -pubout | base64 -w 0)
-rm -f /tmp/grayjay_pubkey.pem
-
-if command -v jq &> /dev/null; then
-    tmp=$(mktemp)
-    jq --arg sig "$SIGNATURE" --arg pub "$PUBLIC_KEY" \
-        '.scriptSignature = $sig | .scriptPublicKey = $pub' \
-        "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
-    echo "Config updated with signature and public key."
-else
-    echo "jq not found. Please manually set:"
-    echo "  scriptSignature: $SIGNATURE"
-    echo "  scriptPublicKey: $PUBLIC_KEY"
-fi
+# Update "scriptSignature" and "scriptPublicKey" fields in Config JSON
+cat $CONFIG_FILE_PATH | jq --arg signature "$SIGNATURE" --arg publicKey "$PUBLIC_KEY" '. + {scriptSignature: $signature, scriptPublicKey: $publicKey}' > temp_config.json && mv temp_config.json $CONFIG_FILE_PATH
