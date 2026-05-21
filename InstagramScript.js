@@ -67,6 +67,7 @@ source.enable = function (conf, _settings) {
 
 // Returns the home feed (empty for logged-out Instagram)
 source.getHome = function () {
+    throw new ScriptException(String(isUrlType("https://www.instagram.com/officialjadenwilliams/")));
     return new ContentPager([]);
 }
 
@@ -115,133 +116,18 @@ source.searchChannelContents = function (url, query, type, order, filters, conti
 source.searchChannels = function (query) {
     if (!query || query.length < 2) 
         return new ChannelPager([], false);
+    
     return new ChannelPager(searchKittygramChannels(query), false);
-}
-
-// Checks whether a URL is an Instagram profile page
-source.isChannelUrl = function (url) {
-    try {
-        const parsed = new URL(url);
-        const host = parsed.hostname;
-        if (host !== 'www.instagram.com' && host !== 'instagram.com') return false;
-
-        const pathname = parsed.pathname.replace(/\/$/, '');
-        const parts = pathname.split('/').filter(Boolean);
-
-        if (parts.length === 0) return true;
-        if (parts.length !== 1) return false;
-
-        return !EXCLUDED_USER_PATHS.includes(parts[0]);
-    } catch {
-        return false;
-    }
 }
 
 // Get channel (user profile) details
 source.getChannel = function (url) {
-    log('getChannel: ' + url);
     const username = extractUsername(url);
 
-    // Return an exception if the URL is invalid or points to a non-user path
     if (!username || EXCLUDED_USER_PATHS.includes(username))
         throw new ScriptException('Instagram channel not found');
 
-    // Fetch profile data from both HTML (meta tags) and web API (richer data)
-    var displayName = username;
-    var thumbnail = null;
-    var description = '';
-    var subscriberCount = null;
-
-    // Try web API first for better data
-    var session = getSession();
-    if (session.lsd && session.mid) {
-        var profileData = fetchWebProfile(username, session);
-        if (profileData && profileData.data && profileData.data.user) {
-            var user = profileData.data.user;
-            displayName = user.full_name || user.username || displayName;
-            thumbnail = user.profile_pic_url_hd || user.profile_pic_url || thumbnail;
-            description = user.biography || description;
-            var followerCount = user.edge_followed_by && user.edge_followed_by.count;
-            if (!followerCount) followerCount = user.follower_count;
-            if (followerCount) subscriberCount = followerCount;
-        } else {
-            
-        }
-    }
-
-    // Fall back to HTML meta tags and embedded data
-    if (!thumbnail) {
-        const response = http.GET(API_URLS.base + '/' + encodeURIComponent(username) + '/', defaultHeaders(), false);
-        if (response && response.isOk) {
-            // Try OG meta tags
-            const meta = extractMetaTags(response.body);
-            if (meta) {
-                if (meta.title && displayName === username) {
-                    var match = meta.title.match(/^([^(]+)/);
-                    if (match) displayName = match[1].trim();
-                    if (!displayName) displayName = username;
-                }
-                thumbnail = meta.image || thumbnail;
-                if (meta.description && !description) description = meta.description;
-            }
-            // Try LD+JSON profile data
-            if (!thumbnail || displayName === username) {
-                try {
-                    var ldProfile = extractLdProfile(response.body);
-                    if (ldProfile && ldProfile.user) {
-                        if (displayName === username) displayName = ldProfile.user.name || displayName;
-                        if (!thumbnail) thumbnail = ldProfile.user.image || thumbnail;
-                        if (ldProfile.user.subscriberCount) subscriberCount = ldProfile.user.subscriberCount;
-                    }
-                } catch {}
-            }
-            // Try regex extraction from raw HTML
-            if (!thumbnail || displayName === username) {
-                try {
-                    var htmlMeta = extractChannelMetadataFromHtml(response.body, username);
-                    if (htmlMeta) {
-                        if (htmlMeta.name && displayName === username) displayName = htmlMeta.name;
-                        if (htmlMeta.thumbnail && !thumbnail) thumbnail = htmlMeta.thumbnail;
-                        if (htmlMeta.subscribers && !subscriberCount) subscriberCount = htmlMeta.subscribers;
-                    }
-                } catch {}
-            }
-        }
-    }
-
-    // Kittygram fallback: always try for followers if missing, and for other data if also missing
-    log('getChannel: before Kittygram - thumbnail=' + (thumbnail ? 'yes' : 'no') + ' subscriberCount=' + subscriberCount + ' displayName=' + displayName);
-    // Always try Kittygram for followers if subscriberCount is null, regardless of thumbnail
-    var needKittygram = !subscriberCount || !thumbnail || displayName === username;
-    if (needKittygram) {
-        try {
-            var kgResult = fetchFromKittygram(username);
-            if (kgResult && kgResult.profile) {
-                var kgProfile = kgResult.profile;
-                if (kgProfile.name && displayName === username) displayName = kgProfile.name;
-                if (kgProfile.thumbnail && !thumbnail) thumbnail = kgProfile.thumbnail;
-                if (kgProfile.followers && !subscriberCount) subscriberCount = kgProfile.followers;
-                if (kgProfile.bio && !description) description = kgProfile.bio;
-                log('getChannel: Kittygram provided profile name=' + displayName + ' thumb=' + (thumbnail ? 'yes' : 'no') + ' subscribers=' + subscriberCount);
-            }
-        } catch (e) {
-            log('getChannel: Kittygram profile fallback error: ' + e);
-        }
-    } else {
-        log('getChannel: skipping Kittygram because have thumbnail and subscriberCount');
-    }
-
-    log('getChannel: final subscriberCount=' + subscriberCount);
-    return new PlatformChannel({
-        id: new PlatformID(platform.title, username, config.id),
-        name: displayName,
-        thumbnail: thumbnail || platform.icon,
-        banner: thumbnail || '',
-        subscribers: subscriberCount,
-        description: description,
-        url: API_URLS.base + '/' + encodeURIComponent(username) + '/',
-        links: {}
-    });
+    return getPlatformChannel(username);
 }
 
 // Get channel feed contents
@@ -261,663 +147,120 @@ source.getChannelCapabilities = function () {
     };
 }
 
-// Checks whether a URL is a photo post with /p/ path
-source.isPostUrl = function (url) {
-    try {
-        const parsed = new URL(url);
-        const pathname = parsed.pathname.replace(/\/$/, '');
-        const host = parsed.hostname;
-        if (host !== 'www.instagram.com' && host !== 'instagram.com') return false;
-        return /\/p\/[A-Za-z0-9_-]+$/.test(pathname) && !pathname.endsWith('/p/');
-    } catch {
-        return false;
-    }
+// Detect channel URL
+source.isChannelUrl = function (url) {
+    return isUrlType(url);
 }
 
-// Checks whether a URL can be resolved via getContentDetails
+// Detect video/reel URL
 source.isContentDetailsUrl = function (stringUrl) {
-    try {
-        const url = new URL(stringUrl);
-        const pathname = url.pathname.replace(/\/$/, '');
-        const host = url.hostname;
-
-        if (host !== 'www.instagram.com' && host !== 'instagram.com') return false;
-
-        // Match /reel/CODE or /username/reel/CODE
-        if (/\/reel\/[A-Za-z0-9_-]+$/.test(pathname) && !pathname.endsWith('/reel/')) return true;
-        // Match /p/CODE or /username/p/CODE
-        if (/\/p\/[A-Za-z0-9_-]+$/.test(pathname) && !pathname.endsWith('/p/')) return true;
-
-        return false;
-    } catch {
-        return false;
-    }
+    return isUrlType(stringUrl, ['p', 'reel']);
 }
 
-// Get video details for a post/reel URL
+// Get video details for Instagram reels
 source.getContentDetails = function (stringUrl) {
-    log('getContentDetails: ' + stringUrl);
-
-    var parsedUrl = new URL(stringUrl);
-    var pathname = parsedUrl.pathname.replace(/\/$/, '');
-
-    var shortcode = null;
-    var reelMatch = pathname.match(/\/reel\/([A-Za-z0-9_-]+)/);
-    if (reelMatch) shortcode = reelMatch[1];
-    var pMatch = pathname.match(/\/p\/([A-Za-z0-9_-]+)/);
-    if (pMatch) shortcode = pMatch[1];
-    if (!shortcode) {
+    var segments = urlSegments(stringUrl);
+    if (!segments) 
         throw new ScriptException('Invalid Instagram URL');
-    }
+
+    var isReel = segments[0] === 'reel';
+    var shortcode = isReel ? segments[1] : (segments[0] === 'p' ? segments[1] : null);
+
+    if (!shortcode) 
+        throw new ScriptException('Invalid Instagram URL');
 
     if (videoUrlCache[shortcode]) {
         log('getContentDetails: using cached video URL for ' + shortcode);
-        var cachedVideoUrl = videoUrlCache[shortcode];
-        var cachedItem = feedItemCache[shortcode] || null;
-        var itemTitle = 'Instagram Post';
-        var itemDesc = '';
-        var itemAuthor = 'Unknown';
-        var itemThumb = '';
-        var itemDuration = null;
-        var itemDatetime = null;
-        if (cachedItem) {
-            try { itemTitle = (cachedItem.caption && (cachedItem.caption.text || cachedItem.caption)) || itemTitle; } catch {}
-            try { itemDesc = (cachedItem.caption && (cachedItem.caption.text || cachedItem.caption)) || ''; } catch {}
-            try {
-                var versions = cachedItem.image_versions2 && cachedItem.image_versions2.candidates;
-                if (versions && versions.length > 0) itemThumb = versions[0].url;
-            } catch {}
-            try { if (cachedItem.display_url && !itemThumb) itemThumb = cachedItem.display_url; } catch {}
-            try { if (cachedItem.thumbnail_src && !itemThumb) itemThumb = cachedItem.thumbnail_src; } catch {}
-            try { if (cachedItem.thumbnail_resources && cachedItem.thumbnail_resources.length > 0 && !itemThumb) itemThumb = cachedItem.thumbnail_resources[0].url; } catch {}
-            try { if (cachedItem.video_duration) itemDuration = Math.round(cachedItem.video_duration); } catch {}
-            try { if (cachedItem.taken_at) itemDatetime = cachedItem.taken_at; } catch {}
-            try { if (cachedItem.user && cachedItem.user.username) itemAuthor = cachedItem.user.username; } catch {}
-            try { if (cachedItem.owner && cachedItem.owner.username) itemAuthor = cachedItem.owner.username; } catch {}
-        }
-        itemTitle = typeof itemTitle === 'string' ? itemTitle.substring(0, 100) : 'Instagram Post';
-        itemDesc = typeof itemDesc === 'string' ? itemDesc : '';
-        var fallbackThumb = itemThumb || platform.icon;
-        log('getContentDetails: cached path thumb=' + fallbackThumb.substring(0, 40) + '...');
-        try {
-        return new PlatformVideoDetails({
-            id: new PlatformID(platform.title, shortcode, config.id),
-            name: itemTitle,
-            thumbnails: new Thumbnails([new Thumbnail(fallbackThumb, 0)]),
-            author: new PlatformAuthorLink(
-                new PlatformID(platform.title, itemAuthor, config.id),
-                itemAuthor,
-                stringUrl,
-                ''
-            ),
-            url: stringUrl,
-            uploadDate: itemDatetime,
-            duration: itemDuration,
-            description: itemDesc,
-            isLive: false,
-            video: new VideoSourceDescriptor(
-                [new VideoUrlSource({
-                    width: 608,
-                    height: 1080,
-                    container: 'video/mp4',
-                    codec: 'avc1.4d401e',
-                    name: 'mp4',
-                    bitrate: 2000000,
-                    duration: itemDuration || 30,
-                    url: cachedVideoUrl
-                })]
-            )
-        });
-        } catch (e) {
-            log('getContentDetails: cached path error: ' + e);
-            videoUrlCache[shortcode] = null;
-        }
+        var cachedMeta = parseCachedItem(feedItemCache[shortcode] || null);
+        cachedMeta.videoUrl = videoUrlCache[shortcode];
+        return getVideoDetails(cachedMeta, shortcode, stringUrl, '', null, false);
     }
 
-    log('getContentDetails: cache miss for ' + shortcode);
+    var meta = fetchContentMetadata(shortcode, stringUrl, isReel);
+    if (!meta.videoUrl) 
+        throw new ScriptException('Video not found');
 
-    var isReel = (/\/reel\//).test(pathname);
-    var postTitle = 'Instagram Post';
-    var postDescription = '';
-    var postThumbnail = '';
-    var authorName = 'Unknown';
-    var authorThumb = '';
-    var postDatetime = null;
-    var videoUrl = null;
-    var postLikes = null;
-    var postDuration = null;
-
-    // Try Kittygram first — avoids potentially hanging unauthenticated requests to Instagram
-    try {
-        log('getContentDetails: trying Kittygram for ' + shortcode);
-        var kgPost = fetchKittygramPostData(shortcode);
-        if (kgPost.videoUrl) {
-            videoUrl = kgPost.videoUrl;
-            log('getContentDetails: Kittygram videoUrl=' + videoUrl.substring(0, 60) + '...');
-        }
-        if (kgPost.thumbnail) postThumbnail = kgPost.thumbnail;
-        if (kgPost.caption) {
-            postTitle = kgPost.caption.substring(0, 100);
-            postDescription = kgPost.caption;
-        }
-        if (kgPost.author) authorName = kgPost.author;
-        if (kgPost.datetime) postDatetime = kgPost.datetime;
-        if (kgPost.likes) postLikes = kgPost.likes;
-        if (kgPost.duration) postDuration = kgPost.duration;
-        if (kgPost.authorThumb) authorThumb = kgPost.authorThumb;
-    } catch (e) {
-        log('getContentDetails: Kittygram error: ' + e);
-    }
-
-    // If Kittygram gave us a video URL, return immediately without hitting Instagram at all
-    if (videoUrl) {
-        log('getContentDetails: returning PlatformVideoDetails with postDuration=' + postDuration);
-        // Kittygram reels have poster="nil" — if no thumbnail from post page, fetch channel page
-        if ((!postThumbnail || !postLikes) && authorName) {
-            var kgHeaders = { 'User-Agent': USER_AGENT, 'Sec-Fetch-Mode': 'navigate' };
-            var instances = getKittygramInstances();
-            var foundFromChannel = false;
-            for (var i = 0; i < instances.length && !foundFromChannel; i++) {
-                var channelUrl = instances[i] + '/' + authorName;
-                log('getContentDetails: fetching channel page for ' + channelUrl);
-                var channelResp = http.GET(channelUrl, kgHeaders, false);
-                if (channelResp && channelResp.isOk && channelResp.body) {
-                    var channelDoc = domParser.parseFromString(channelResp.body, 'text/html');
-                    var allCards = channelDoc.querySelectorAll('.item-card.post');
-                    for (var c = 0; c < allCards.length; c++) {
-                        var card = allCards[c];
-                        var linkInCard = card.querySelector('a[href="/p/' + shortcode + '"]');
-                        if (linkInCard) {
-                            if (!postThumbnail) {
-                                var cardVideo = card.querySelector('.post-image video');
-                                if (cardVideo) {
-                                    var poster = cardVideo.getAttribute('poster');
-                                    if (poster && poster !== 'nil') {
-                                        postThumbnail = decodeKittygramProxy(poster);
-                                    }
-                                }
-                                if (!postThumbnail) {
-                                    var cardImg = card.querySelector('.post-image img');
-                                    if (cardImg) {
-                                        var src = cardImg.getAttribute('src');
-                                        if (src && src !== 'nil') postThumbnail = decodeKittygramProxy(src);
-                                    }
-                                }
-                            }
-                            if (!postLikes) {
-                                var cardLikesEl = card.querySelector('.post-likes');
-                                if (cardLikesEl) {
-                                    var likesText = cardLikesEl.textContent || '';
-                                    if (likesText.toLowerCase().indexOf('nil') === -1) {
-                                        var likesMatch = likesText.match(/([\d,]+)/);
-                                        if (likesMatch) {
-                                            var likesNum = parseInt(likesMatch[1].replace(/,/g, ''), 10);
-                                            if (!isNaN(likesNum)) postLikes = likesNum;
-                                        }
-                                    }
-                                }
-                            }
-                            log('getContentDetails: got from channel page - thumb=' + (postThumbnail ? 'yes' : 'no') + ' likes=' + (postLikes || 'none'));
-                            foundFromChannel = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        var thumbUrl = postThumbnail || platform.icon;
-        var authorAvatar = authorThumb || platform.icon;
-        return new PlatformVideoDetails({
-            id: new PlatformID(platform.title, shortcode, config.id),
-            name: postTitle,
-            thumbnails: new Thumbnails([new Thumbnail(thumbUrl, 0)]),
-            author: new PlatformAuthorLink(
-                new PlatformID(platform.title, authorName, config.id),
-                authorName,
-                API_URLS.base + '/' + encodeURIComponent(authorName) + '/',
-                authorAvatar
-            ),
-            url: stringUrl,
-            uploadDate: postDatetime,
-            duration: postDuration,
-            description: postDescription,
-            isLive: false,
-            rating: postLikes ? new RatingLikes(postLikes) : null,
-            video: new VideoSourceDescriptor([new VideoUrlSource({
-                width: 720,
-                height: 1280,
-                container: 'video/mp4',
-                codec: 'avc1',
-                name: 'mp4',
-                bitrate: 2000000,
-                duration: postDuration || 30,
-                url: videoUrl
-            })])
-        });
-    }
-
-    // If Kittygram gave us a thumbnail but no video (photo post), return PlatformPostDetails directly
-    if (postThumbnail) {
-        log('getContentDetails: photo post from Kittygram, returning PlatformPostDetails');
-        var photoAuthorAvatar = authorThumb || platform.icon;
-        return new PlatformPostDetails({
-            id: new PlatformID(platform.title, shortcode, config.id),
-            name: postTitle,
-            author: new PlatformAuthorLink(
-                new PlatformID(platform.title, authorName, config.id),
-                authorName,
-                API_URLS.base + '/' + encodeURIComponent(authorName) + '/',
-                photoAuthorAvatar
-            ),
-            datetime: postDatetime,
-            url: stringUrl,
-            description: postDescription,
-            images: [postThumbnail],
-            textType: Type.Text.Raw,
-            content: postDescription,
-            thumbnails: new Thumbnails([new Thumbnail(postThumbnail, 0)]),
-            rating: postLikes ? new RatingLikes(postLikes) : null
-        });
-    }
-
-    // If no thumbnail either, try Instagram page (may hang for unauthenticated)
-    // Kittygram had no video — try Instagram's own page (may hang for unauthenticated reels)
-    // Ensure session is established before fetching page (sets cookies for richer page data)
-    getSession();
-
-    // Fetch the post page to determine content type and extract metadata
-    var pageUrl = API_URLS.base + (isReel ? '/reel/' : '/p/') + shortcode + '/';
-    var pageResp = http.GET(pageUrl, defaultHeaders(), false);
-
-    if (pageResp && pageResp.isOk && pageResp.body) {
-        var meta = extractMetaTags(pageResp.body);
-        if (meta) {
-            if (meta.title && meta.title !== 'Instagram') postTitle = meta.title;
-            if (meta.description) postDescription = meta.description;
-            if (meta.image) postThumbnail = meta.image;
-        }
-        // Try HTML regex fallback when OG meta has no thumbnail or had generic title
-        if (!meta || !meta.image || meta.title === 'Instagram') {
-            var htmlMeta = extractPostMetadataFromHtml(pageResp.body, shortcode);
-            if (htmlMeta) {
-                if (htmlMeta.title) postTitle = htmlMeta.title;
-                if (htmlMeta.description) postDescription = htmlMeta.description;
-                if (htmlMeta.thumbnail) postThumbnail = htmlMeta.thumbnail;
-                if (htmlMeta.author) authorName = htmlMeta.author;
-                if (htmlMeta.datetime) postDatetime = htmlMeta.datetime;
-            }
-        }
-
-        // Extract author from og:title pattern or HTML metadata: "Author on Instagram: ..."
-        var authorMatch = postTitle.match(/^([^|]+?)\s+on\s+Instagram/);
-        if (authorMatch) authorName = authorMatch[1].trim();
-
-        // Determine content type from og:type, LD+JSON, or URL
-        var ogType = '';
-        try {
-            var doc = domParser.parseFromString(pageResp.body, 'text/html');
-            var ogTypeMeta = doc.querySelector('meta[property="og:type"]');
-            if (ogTypeMeta) ogType = ogTypeMeta.getAttribute('content') || '';
-        } catch {}
-
-        // Extract images and author info from LD+JSON (for both photo and video posts)
-        var postImages = [];
-        if (postThumbnail) postImages.push(postThumbnail);
-        var ldVideoData = null;
-        try {
-            var ldDoc = domParser.parseFromString(pageResp.body, 'text/html');
-            var ldScripts = ldDoc.querySelectorAll('script[type="application/ld+json"]');
-            for (var si = 0; si < ldScripts.length; si++) {
-                var ldData = JSON.parse(ldScripts[si].textContent);
-                var ldItems = Array.isArray(ldData) ? ldData : [ldData];
-                for (var li = 0; li < ldItems.length; li++) {
-                    // Capture image objects
-                    if (ldItems[li]['@type'] === 'ImageObject' && ldItems[li].contentUrl && postImages.indexOf(ldItems[li].contentUrl) === -1) {
-                        postImages.push(ldItems[li].contentUrl);
-                    }
-                    // Capture author from any entity that has it
-                    if (ldItems[li].author && ldItems[li].author.name) {
-                        authorName = ldItems[li].author.name;
-                    }
-                    // Capture VideoObject data
-                    if (ldItems[li]['@type'] === 'VideoObject' || (Array.isArray(ldItems[li]['@type']) && ldItems[li]['@type'].includes('VideoObject'))) {
-                        ldVideoData = ldItems[li];
-                    }
-                }
-            }
-        } catch {}
-
-        // Extract video author/timestamp/thumbnail from LD+JSON VideoObject
-        if (ldVideoData) {
-            if (ldVideoData.author && ldVideoData.author.name) authorName = ldVideoData.author.name;
-            if (ldVideoData.uploadDate) {
-                var ldDatetime = parseDatetimeToUnix(ldVideoData.uploadDate);
-                if (ldDatetime) postDatetime = ldDatetime;
-            }
-            if (ldVideoData.thumbnailUrl && !postThumbnail) postThumbnail = ldVideoData.thumbnailUrl;
-            if (ldVideoData.description && !postDescription) postDescription = ldVideoData.description;
-        }
-        log('getContentDetails: metadata for ' + shortcode + ' title=' + postTitle.substring(0, 40) + ' thumb=' + (postThumbnail ? postThumbnail.substring(0, 40) + '...' : 'none') + ' author=' + authorName);
-    }
-
-    log('getContentDetails: fetching videoUrl for ' + shortcode);
-    videoUrl = fetchVideoUrl(shortcode);
-    log('getContentDetails: fetchVideoUrl returned ' + (videoUrl ? 'url=' + videoUrl.substring(0, 40) + '...' : 'null'));
-
-    // Fallback: try web_profile_info lookup if URL includes a username
-    if (!videoUrl) {
-        var usernameFromUrl = null;
-        try {
-            var pathSegments = pathname.split('/').filter(function(s) { return s.length > 0; });
-            // Path segments: [username, "reel"|"p", shortcode] or ["reel"|"p", shortcode]
-            if (pathSegments.length >= 3) {
-                usernameFromUrl = pathSegments[0];
-            }
-        } catch {}
-        if (usernameFromUrl) {
-            try {
-                var fbSession = getSession();
-                if (fbSession.lsd && fbSession.mid) {
-                    var profileData = fetchWebProfile(usernameFromUrl, fbSession);
-                    if (profileData && profileData.data && profileData.data.user) {
-                        var userObj = profileData.data.user;
-                        var mediaSources = [
-                            userObj.edge_owner_to_timeline_media,
-                            userObj.edge_felix_video_timeline
-                        ];
-                        for (var si = 0; si < mediaSources.length && !videoUrl; si++) {
-                            var conn = mediaSources[si];
-                            if (conn && conn.edges) {
-                                for (var ei = 0; ei < conn.edges.length; ei++) {
-                                    var node = conn.edges[ei].node;
-                                    if (node && node.shortcode === shortcode) {
-                                        if (node.video_versions && node.video_versions.length > 0) {
-                                            videoUrl = node.video_versions[0].url;
-                                            videoUrlCache[shortcode] = videoUrl;
-                                            feedItemCache[shortcode] = {
-                                                code: shortcode,
-                                                id: node.id,
-                                                taken_at: node.taken_at_timestamp,
-                                                video_versions: node.video_versions,
-                                                image_versions2: node.thumbnail_resources ? { candidates: node.thumbnail_resources } : null,
-                                                caption: node.edge_media_to_caption && node.edge_media_to_caption.edges && node.edge_media_to_caption.edges[0] ? { text: node.edge_media_to_caption.edges[0].node.text } : null,
-                                                product_type: 'clips',
-                                                video_duration: node.video_duration
-                                            };
-                                            if (node.owner && node.owner.username) authorName = node.owner.username;
-                                            if (node.taken_at_timestamp) postDatetime = node.taken_at_timestamp;
-                                            log('fetchVideoUrl: found via web_profile_info lookup for ' + usernameFromUrl);
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (e) {
-                log('getContentDetails: web_profile_info fallback error: ' + e);
-            }
-        }
-    }
-
-    if (videoUrl) {
-        // If metadata is still empty, try __a=1 page for richer embedded data (1.3MB with script tags)
-        if (!postThumbnail || postThumbnail === platform.icon || postTitle === 'Instagram Post') {
-            try {
-                var a1Url = API_URLS.base + (isReel ? '/reel/' : '/p/') + shortcode + '/?__a=1';
-                log('getContentDetails: retrying metadata via ' + a1Url);
-                var a1Resp = http.GET(a1Url, defaultHeaders(), false);
-                if (a1Resp && a1Resp.isOk && a1Resp.body) {
-                    var a1Meta = extractPostMetadataFromHtml(a1Resp.body, shortcode);
-                    if (a1Meta) {
-                        if (a1Meta.title && (postTitle === 'Instagram Post' || !postTitle)) postTitle = a1Meta.title;
-                        if (a1Meta.thumbnail && (!postThumbnail || postThumbnail === platform.icon)) postThumbnail = a1Meta.thumbnail;
-                        if (a1Meta.author && authorName === 'Unknown') authorName = a1Meta.author;
-                        if (a1Meta.datetime && !postDatetime) postDatetime = a1Meta.datetime;
-                        if (a1Meta.description && !postDescription) postDescription = a1Meta.description;
-                        log('getContentDetails: __a=1 metadata yielded thumb=' + (a1Meta.thumbnail ? a1Meta.thumbnail.substring(0, 40) + '...' : 'none'));
-                    }
-                }
-            } catch (e) {
-                log('getContentDetails: __a=1 metadata error: ' + e);
-            }
-        }
-
-        var thumbUrl = postThumbnail || platform.icon;
-        log('getContentDetails: video URL found, returning PlatformVideoDetails with thumb=' + thumbUrl.substring(0, 40) + '...');
-        return new PlatformVideoDetails({
-            id: new PlatformID(platform.title, shortcode, config.id),
-            name: postTitle.substring(0, 100),
-            thumbnails: new Thumbnails([new Thumbnail(thumbUrl, 0)]),
-            author: new PlatformAuthorLink(
-                new PlatformID(platform.title, authorName, config.id),
-                authorName,
-                API_URLS.base + '/' + encodeURIComponent(authorName) + '/',
-                ''
-            ),
-            url: stringUrl,
-            uploadDate: postDatetime,
-            duration: null,
-            description: postDescription,
-            isLive: false,
-            video: new VideoSourceDescriptor(
-                [new VideoUrlSource({
-                    width: 608,
-                    height: 1080,
-                    container: 'video/mp4',
-                    codec: 'avc1.4d401e',
-                    name: 'mp4',
-                    bitrate: 2000000,
-                    duration: 30,
-                    url: videoUrl
-                })]
-            )
-        });
-    }
-
-    log('getContentDetails: no video URL found, falling back to getPost');
-    // getPost only matched /p/ URLs historically — normalise to /p/ so it always works
-    var postFallbackUrl = API_URLS.base + '/p/' + shortcode + '/';
-    return source.getPost(postFallbackUrl);
+    return getVideoDetails(meta, shortcode, stringUrl,
+        meta.authorThumb || '',
+        meta.likes,
+        meta.source === 'kittygram'
+    );
 }
 
 // Get photo post details
 source.getPost = function (stringUrl) {
-    log('getPost: ' + stringUrl);
-    var parsedUrl = new URL(stringUrl);
-    var pathname = parsedUrl.pathname.replace(/\/$/, '');
-    var shortcode = null;
-    var pMatch = pathname.match(/\/p\/([A-Za-z0-9_-]+)/);
-    if (pMatch) shortcode = pMatch[1];
-    if (!shortcode) {
-        var reelMatch2 = pathname.match(/\/reel\/([A-Za-z0-9_-]+)/);
-        if (reelMatch2) shortcode = reelMatch2[1];
-    }
-    if (!shortcode)
+    const segments = urlSegments(stringUrl);
+    if (!segments || segments.length < 2) 
         throw new ScriptException('Invalid Instagram post URL');
 
-    // Ensure session is established before fetching page (sets cookies for richer page data)
-    getSession();
+    const shortcode = segments[segments.length - 1];
+    if (!shortcode) 
+        throw new ScriptException('Invalid Instagram post URL');
 
-    var pageUrl = API_URLS.base + '/p/' + shortcode + '/';
-    var pageResp = http.GET(pageUrl, defaultHeaders(), false);
-    var postTitle = 'Instagram Post';
-    var postDescription = '';
-    var postThumbnail = '';
-    var authorName = 'Unknown';
-    var postDatetime = null;
-    var postImages = [];
-
-    if (pageResp && pageResp.isOk && pageResp.body) {
-        var meta = extractMetaTags(pageResp.body);
-        if (meta) {
-            if (meta.title && meta.title !== 'Instagram') postTitle = meta.title;
-            if (meta.description) postDescription = meta.description;
-            if (meta.image) postThumbnail = meta.image;
-        }
-        if (!meta || !meta.image || meta.title === 'Instagram') {
-            var htmlMeta = extractPostMetadataFromHtml(pageResp.body, shortcode);
-            if (htmlMeta) {
-                if (htmlMeta.title) postTitle = htmlMeta.title;
-                if (htmlMeta.description) postDescription = htmlMeta.description;
-                if (htmlMeta.thumbnail) postThumbnail = htmlMeta.thumbnail;
-                if (htmlMeta.author) authorName = htmlMeta.author;
-                if (htmlMeta.datetime) postDatetime = htmlMeta.datetime;
-            }
-        }
-
-        var authorMatch = postTitle.match(/^([^|]+?)\s+on\s+Instagram/);
-        if (authorMatch) authorName = authorMatch[1].trim();
-
-        if (postThumbnail) postImages.push(postThumbnail);
-
-        try {
-            var ldDoc = domParser.parseFromString(pageResp.body, 'text/html');
-            var ldScripts = ldDoc.querySelectorAll('script[type="application/ld+json"]');
-            for (var si = 0; si < ldScripts.length; si++) {
-                var ldData = JSON.parse(ldScripts[si].textContent);
-                var ldItems = Array.isArray(ldData) ? ldData : [ldData];
-                for (var li = 0; li < ldItems.length; li++) {
-                    if (ldItems[li]['@type'] === 'ImageObject' && ldItems[li].contentUrl && postImages.indexOf(ldItems[li].contentUrl) === -1) {
-                        postImages.push(ldItems[li].contentUrl);
-                        if (!postThumbnail) postThumbnail = ldItems[li].contentUrl;
-                    }
-                    if (ldItems[li].author && ldItems[li].author.name)
-                        authorName = ldItems[li].author.name;
-                    if ((ldItems[li]['@type'] === 'VideoObject' || (Array.isArray(ldItems[li]['@type']) && ldItems[li]['@type'].includes('VideoObject'))) && ldItems[li].thumbnailUrl && !postThumbnail)
-                        postThumbnail = ldItems[li].thumbnailUrl;
-                }
-            }
-        } catch {}
-        log('getPost: metadata for ' + shortcode + ' title=' + postTitle.substring(0, 40) + ' images=' + postImages.length + ' thumb=' + (postThumbnail ? postThumbnail.substring(0, 40) + '...' : 'none') + ' author=' + authorName);
-    }
+    const meta = fetchPostMetadata(shortcode);
 
     return new PlatformPostDetails({
         id: new PlatformID(platform.title, shortcode, config.id),
-        name: postTitle.substring(0, 100),
-        author: new PlatformAuthorLink(
-            new PlatformID(platform.title, authorName, config.id),
-            authorName,
-            API_URLS.base + '/' + encodeURIComponent(authorName) + '/',
-            ''
-        ),
-        datetime: postDatetime,
+        name: meta.title.substring(0, 100),
+        author: getAuthor(meta.authorName, API_URLS.base + '/' + encodeURIComponent(meta.authorName) + '/', ''),
+        datetime: meta.datetime,
         url: stringUrl,
-        description: postDescription,
-        images: postImages,
+        description: meta.description,
+        images: meta.images,
         textType: Type.Text.Raw,
-        content: postDescription,
+        content: meta.description,
         thumbnails: []
     });
 }
 
 // Get comments for a post
 source.getComments = function (stringUrl) {
-    log('getComments: ' + stringUrl);
-    var parsedUrl = new URL(stringUrl);
-    var pathname = parsedUrl.pathname.replace(/\/$/, '');
-    var shortcode = null;
-    var pMatch = pathname.match(/\/p\/([A-Za-z0-9_-]+)/);
-    if (pMatch) shortcode = pMatch[1];
-    if (!shortcode) {
-        var reelMatch = pathname.match(/\/reel\/([A-Za-z0-9_-]+)/);
-        if (reelMatch) shortcode = reelMatch[1];
+    var segments = urlSegments(stringUrl);
+    if (!segments || segments.length < 2) 
+        return new InstagramCommentPager([], false);
+    
+    // Return post/reel shortcode
+    return getCommentsPager(segments[segments.length - 1]);
+}
+
+// Playlists are not supported
+source.isPlaylistUrl = function (stringUrl) {
+    return false;
+}
+
+// Playlists are not supported
+source.getPlaylist = function (stringUrl) {
+    throw new ScriptException('Playlists are not supported');
+}
+
+// Returns empty pager
+source.searchPlaylists = function (query, type, order, filters, continuationToken) {
+    return new PlaylistPager([], false);
+}
+
+// Returns empty claim map
+source.getChannelTemplateByClaimMap = function () {
+    return {};
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Checks a URL against a URL type pattern.
+ * @param {string} url - The URL to check
+ * @param {string[]} [prefixes] - Array of valid first-segment prefixes (e.g. ['p','reel']). Omit or pass falsy for channel mode.
+ * @returns {boolean}
+ */
+function isUrlType(url, prefixes) {
+    var p = urlSegments(url);
+    if (!prefixes) {
+        // Channel: 0 segments (root URL) or 1 segment not in excluded paths
+        return p !== null && p.length <= 1 && (p.length === 0 || !EXCLUDED_USER_PATHS.includes(p[0]));
     }
-    if (!shortcode) {
-        return new InstagramCommentPager([], false, { shortcode: null });
-    }
-
-    var kgHeaders = {
-        'User-Agent': USER_AGENT,
-        'Sec-Fetch-Mode': 'navigate'
-    };
-
-    var instances = getKittygramInstances();
-    var foundComments = null;
-    var videoDatetime = 0;
-    instances.some(function(instance) {
-        try {
-            var url = instance + '/p/' + shortcode;
-            log('getComments: trying ' + url);
-            var resp = http.GET(url, kgHeaders, false);
-            if (resp && resp.isOk && resp.body) {
-                var postDoc = domParser.parseFromString(resp.body, 'text/html');
-                var bodyText = postDoc.body ? postDoc.body.textContent : '';
-                // Try datetime from cache first (populated by getChannelContents)
-                if (datetimeCache[shortcode]) {
-                    videoDatetime = datetimeCache[shortcode];
-                    log('getComments: used datetimeCache for ' + shortcode + ' = ' + videoDatetime);
-                }
-                // Fall back to extracting from the post page
-                if (!videoDatetime) {
-                    var timeEl = postDoc.querySelector('time.post-time');
-                    if (timeEl) {
-                        var dtAttr = timeEl.getAttribute('datetime');
-                        if (dtAttr) {
-                            var parsed = parseDatetimeToUnix(dtAttr);
-                            if (parsed !== null) {
-                                videoDatetime = parsed;
-                                log('getComments: extracted videoDatetime=' + videoDatetime + ' from datetime attr "' + dtAttr + '"');
-                            }
-                        }
-                    }
-                    if (!videoDatetime) {
-                        // Fallback: scrape "Posted at: YYYY-MM-DD HH:MM:SS" from text
-                        var timeMatch = bodyText.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/);
-                        if (timeMatch) {
-                            var parsed2 = parseDatetimeToUnix(timeMatch[1] + ' ' + timeMatch[2]);
-                            if (parsed2 !== null) {
-                                videoDatetime = parsed2;
-                                log('getComments: extracted videoDatetime=' + videoDatetime + ' from text fallback');
-                            } else {
-                                log('getComments: parseDatetimeToUnix returned null for "' + timeMatch[1] + ' ' + timeMatch[2] + '"');
-                            }
-                        } else {
-                            log('getComments: no datetime found');
-                        }
-                    }
-                }
-
-                // Extract likes using domParser - look for "nil likes" or number
-                var itemLikes = null;
-                var likesEl = postDoc.querySelector('.post-likes');
-                if (likesEl) {
-                    var likesText = likesEl.textContent || '';
-                    log('getComments: .post-likes text="' + likesText.trim() + '"');
-                    if (likesText.toLowerCase().indexOf('nil') === -1) {
-                        var likesMatch = likesText.match(/([\d,]+)/);
-                        if (likesMatch) {
-                            var likesNum = parseInt(likesMatch[1].replace(/,/g, ''), 10);
-                            if (!isNaN(likesNum)) itemLikes = likesNum;
-                        }
-                    }
-                } else {
-                    var bodyFullText = postDoc.body ? postDoc.body.textContent : '';
-                    if (bodyFullText.toLowerCase().indexOf('nil likes') === -1) {
-                        var likesMatch2 = bodyFullText.match(/([\d,]+)\s*likes?/i);
-                        if (likesMatch2) {
-                            var likesNum2 = parseInt(likesMatch2[1].replace(/,/g, ''), 10);
-                            if (!isNaN(likesNum2)) itemLikes = likesNum2;
-                        }
-                    }
-                }
-                log('getComments: extracted likes=' + itemLikes);
-                var comments = parseKittygramPostPageComments(resp.body, shortcode, videoDatetime);
-                log('getComments: found ' + comments.length + ' comments from ' + instance + ' with datetime=' + videoDatetime);
-                foundComments = new InstagramCommentPager(comments, false, { shortcode: shortcode, instance: instance });
-                return true;
-            }
-        } catch (e) {
-            log('getComments: error: ' + e);
-        }
-        return false;
-    });
-
-    if (foundComments) return foundComments;
-    log('getComments: no comments found, returning empty');
-    showToast('Failed to load comments');
-    return new InstagramCommentPager([], false, { shortcode: shortcode });
+    // Content: exactly 2 segments, first matches a prefix, second is the ID
+    return p !== null && p.length === 2 && prefixes.indexOf(p[0]) !== -1 && p[1].length > 0;
 }
 
 /**
@@ -957,12 +300,7 @@ function parseKittygramPostPageComments(html, shortcode, videoDatetime) {
                 if (author && text) {
                     comments.push(new PlatformComment({
                         id: new PlatformID(platform.title, shortcode + '_c' + idx, config.id),
-                        author: new PlatformAuthorLink(
-                            new PlatformID(platform.title, author, config.id),
-                            author,
-                            API_URLS.base + '/' + encodeURIComponent(author) + '/',
-                            avatar
-                        ),
+                        author: getAuthor(author, API_URLS.base + '/' + encodeURIComponent(author) + '/', avatar),
                         message: text
                     }));
                 }
@@ -974,32 +312,209 @@ function parseKittygramPostPageComments(html, shortcode, videoDatetime) {
         log('parseKittygramPostPageComments: error: ' + e);
     }
 
-    return comments;
+            return comments;
 }
 
-// Playlists are not supported
-source.isPlaylistUrl = function (stringUrl) {
-    return false;
+/**
+ * Extracts the post datetime from a Kittygram post page DOM.
+ * Tries <time> element, then text fallback.
+ * @param {Document} postDoc - Parsed post page DOM
+ * @returns {number} Unix timestamp in seconds, or 0 if not found
+ */
+function extractPostDatetime(postDoc) {
+    var bodyText = postDoc.body ? postDoc.body.textContent : '';
+    var timeEl = postDoc.querySelector('time.post-time');
+    if (timeEl) {
+        var dtAttr = timeEl.getAttribute('datetime');
+        if (dtAttr) {
+            var parsed = parseDatetimeToUnix(dtAttr);
+            if (parsed !== null) return parsed;
+        }
+    }
+    var timeMatch = bodyText.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/);
+    if (timeMatch) {
+        var parsed2 = parseDatetimeToUnix(timeMatch[1] + ' ' + timeMatch[2]);
+        if (parsed2 !== null) return parsed2;
+    }
+    return 0;
 }
 
-// Playlists are not supported
-source.getPlaylist = function (stringUrl) {
-    throw new ScriptException('Playlists are not supported');
+/**
+ * Fetches comments for a post from Kittygram instances.
+ * Tries each instance in order until comments are found.
+ * @param {string} shortcode - Post/reel shortcode
+ * @returns {InstagramCommentPager}
+ */
+function getCommentsPager(shortcode) {
+    var instances = getKittygramInstances();
+    var found = null;
+    instances.some(function(instance) {
+        try {
+            var url = instance + '/p/' + shortcode;
+            log('getCommentsPager: trying ' + url);
+            var resp = http.GET(url, { 'User-Agent': USER_AGENT, 'Sec-Fetch-Mode': 'navigate' }, false);
+            if (resp && resp.isOk && resp.body) {
+                var postDoc = domParser.parseFromString(resp.body, 'text/html');
+                var videoDatetime = datetimeCache[shortcode] || extractPostDatetime(postDoc);
+                var comments = parseKittygramPostPageComments(resp.body, shortcode, videoDatetime);
+                log('getCommentsPager: found ' + comments.length + ' comments from ' + instance);
+                found = new InstagramCommentPager(comments, false, { shortcode: shortcode, instance: instance });
+                return true;
+            }
+        } catch (e) {
+            log('getCommentsPager: error: ' + e);
+        }
+        return false;
+    });
+    if (found) return found;
+    showToast('Failed to load comments');
+    return new InstagramCommentPager([], false, { shortcode: shortcode });
 }
 
-// Returns empty pager
-source.searchPlaylists = function (query, type, order, filters, continuationToken) {
-    return new PlaylistPager([], false);
+/**
+ * Fetches and parses metadata for a photo post from Instagram's page.
+ * Tries meta tags, HTML regex, and LD+JSON extraction.
+ * @param {string} shortcode - Post shortcode
+ * @returns {Object} { title, description, thumbnail, authorName, datetime, images }
+ */
+function fetchPostMetadata(shortcode) {
+    getSession();
+    var pageResp = http.GET(API_URLS.base + '/p/' + shortcode + '/', defaultHeaders(), false);
+    var title = 'Instagram Post';
+    var description = '';
+    var thumbnail = '';
+    var authorName = 'Unknown';
+    var datetime = null;
+    var images = [];
+
+    if (pageResp && pageResp.isOk && pageResp.body) {
+        var meta = extractMetaTags(pageResp.body);
+        if (meta) {
+            if (meta.title && meta.title !== 'Instagram') title = meta.title;
+            if (meta.description) description = meta.description;
+            if (meta.image) thumbnail = meta.image;
+        }
+        if (!meta || !meta.image || meta.title === 'Instagram') {
+            var htmlMeta = extractPostMetadataFromHtml(pageResp.body, shortcode);
+            if (htmlMeta) {
+                if (htmlMeta.title) title = htmlMeta.title;
+                if (htmlMeta.description) description = htmlMeta.description;
+                if (htmlMeta.thumbnail) thumbnail = htmlMeta.thumbnail;
+                if (htmlMeta.author) authorName = htmlMeta.author;
+                if (htmlMeta.datetime) datetime = htmlMeta.datetime;
+            }
+        }
+
+        var authorMatch = title.match(/^([^|]+?)\s+on\s+Instagram/);
+        if (authorMatch) authorName = authorMatch[1].trim();
+
+        if (thumbnail) images.push(thumbnail);
+
+        try {
+            var ldDoc = domParser.parseFromString(pageResp.body, 'text/html');
+            var ldScripts = ldDoc.querySelectorAll('script[type="application/ld+json"]');
+            for (var si = 0; si < ldScripts.length; si++) {
+                var ldData = JSON.parse(ldScripts[si].textContent);
+                var ldItems = Array.isArray(ldData) ? ldData : [ldData];
+                for (var li = 0; li < ldItems.length; li++) {
+                    if (ldItems[li]['@type'] === 'ImageObject' && ldItems[li].contentUrl && images.indexOf(ldItems[li].contentUrl) === -1) {
+                        images.push(ldItems[li].contentUrl);
+                        if (!thumbnail) thumbnail = ldItems[li].contentUrl;
+                    }
+                    if (ldItems[li].author && ldItems[li].author.name) authorName = ldItems[li].author.name;
+                    if ((ldItems[li]['@type'] === 'VideoObject' || (Array.isArray(ldItems[li]['@type']) && ldItems[li]['@type'].includes('VideoObject'))) && ldItems[li].thumbnailUrl && !thumbnail)
+                        thumbnail = ldItems[li].thumbnailUrl;
+                }
+            }
+        } catch {}
+    }
+
+    return { title: title, description: description, thumbnail: thumbnail, authorName: authorName, datetime: datetime, images: images };
 }
 
-// Returns empty claim map
-source.getChannelTemplateByClaimMap = function () {
-    return {};
+/**
+/**
+ * Creates a PlatformAuthorLink using the platform's ID format.
+ * @param {string} name - Author username
+ * @param {string} url - Author profile URL
+ * @param {string} [avatar] - Author avatar URL
+ * @returns {PlatformAuthorLink}
+ */
+function getAuthor(name, url, avatar) {
+    return new PlatformAuthorLink(new PlatformID(platform.title, name, config.id), name, url, avatar || '');
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// HELPER FUNCTIONS
-// ═══════════════════════════════════════════════════════════════════════
+/**
+ * Creates a PlatformVideoDetails from parsed metadata.
+ * @param {Object} meta - Parsed metadata (from parseCachedItem or fetchContentMetadata)
+ * @param {string} shortcode - Post/reel shortcode
+ * @param {string} stringUrl - Original URL
+ * @param {string} authorAvatar - Author avatar URL (empty string if none)
+ * @param {number|null} [likes] - Like count (null if none)
+ * @param {boolean} [isKittygram] - Use Kittygram video dimensions (720x1280) vs Instagram (608x1080)
+ * @returns {PlatformVideoDetails}
+ */
+function getVideoDetails(meta, shortcode, stringUrl, authorAvatar, likes, isKittygram) {
+    var thumbUrl = meta.thumbnail || platform.icon;
+    var videoDuration = isKittygram ? (meta.duration || 30) : (meta.duration || 30);
+    var width = isKittygram ? 720 : 608;
+    var height = isKittygram ? 1280 : 1080;
+    var codec = isKittygram ? 'avc1' : 'avc1.4d401e';
+    return new PlatformVideoDetails({
+        id: new PlatformID(platform.title, shortcode, config.id),
+        name: meta.title.substring(0, 100),
+        thumbnails: new Thumbnails([new Thumbnail(thumbUrl, 0)]),
+        author: getAuthor(meta.authorName, stringUrl, authorAvatar || ''),
+        url: stringUrl,
+        uploadDate: meta.datetime,
+        duration: meta.duration,
+        description: meta.description,
+        isLive: false,
+        rating: likes ? new RatingLikes(likes) : null,
+        video: new VideoSourceDescriptor([new VideoUrlSource({
+            width: width, height: height, container: 'video/mp4', codec: codec,
+            name: 'mp4', bitrate: 2000000, duration: videoDuration, url: meta.videoUrl
+        })])
+    });
+}
+
+/**
+ * @param {Object|null} cachedItem - Cached feed item from feedItemCache
+ * @returns {Object} { title, description, thumbnail, authorName, duration, datetime }
+ */
+function parseCachedItem(cachedItem) {
+    var title = 'Instagram Post';
+    var description = '';
+    var thumbnail = '';
+    var authorName = 'Unknown';
+    var duration = null;
+    var datetime = null;
+
+    if (cachedItem) {
+        try { title = (cachedItem.caption && (cachedItem.caption.text || cachedItem.caption)) || title; } catch {}
+        try { description = (cachedItem.caption && (cachedItem.caption.text || cachedItem.caption)) || ''; } catch {}
+        try {
+            var versions = cachedItem.image_versions2 && cachedItem.image_versions2.candidates;
+            if (versions && versions.length > 0) thumbnail = versions[0].url;
+        } catch {}
+        try { if (cachedItem.display_url && !thumbnail) thumbnail = cachedItem.display_url; } catch {}
+        try { if (cachedItem.thumbnail_src && !thumbnail) thumbnail = cachedItem.thumbnail_src; } catch {}
+        try { if (cachedItem.thumbnail_resources && cachedItem.thumbnail_resources.length > 0 && !thumbnail) thumbnail = cachedItem.thumbnail_resources[0].url; } catch {}
+        try { if (cachedItem.video_duration) duration = Math.round(cachedItem.video_duration); } catch {}
+        try { if (cachedItem.taken_at) datetime = cachedItem.taken_at; } catch {}
+        try { if (cachedItem.user && cachedItem.user.username) authorName = cachedItem.user.username; } catch {}
+        try { if (cachedItem.owner && cachedItem.owner.username) authorName = cachedItem.owner.username; } catch {}
+    }
+
+    return {
+        title: typeof title === 'string' ? title.substring(0, 100) : 'Instagram Post',
+        description: typeof description === 'string' ? description : '',
+        thumbnail: thumbnail,
+        authorName: authorName,
+        duration: duration,
+        datetime: datetime
+    };
+}
 
 /**
  * Parses a Kittygram search result card element into a PlatformChannel object.
@@ -1009,20 +524,117 @@ source.getChannelTemplateByClaimMap = function () {
 function parseChannelFromCard(card) {
     var usernameLink = card.querySelector('a.username');
     var avatarImg = card.querySelector('img');
-    if (!usernameLink) return null;
+    if (!usernameLink) 
+        return null;
+
     var username = usernameLink.getAttribute('href').replace('/', '');
-    var avatar = platform.icon;
+    var avatar = null;
     if (avatarImg) {
         var src = avatarImg.getAttribute('src');
         if (src) avatar = decodeKittygramProxy(src);
     }
+    
     return new PlatformChannel({
         id: new PlatformID(platform.title, username, config.id),
         name: username,
-        thumbnail: avatar,
-        banner: avatar,
+        thumbnail: avatar || platform.icon,
+        banner: avatar || '',
         subscribers: 0,
         description: '',
+        url: API_URLS.base + '/' + encodeURIComponent(username) + '/',
+        links: {}
+    });
+}
+
+/**
+ * Fetches and assembles a PlatformChannel for the given username.
+ * Tries web API, HTML meta tags, LD+JSON, regex extraction, and Kittygram fallback.
+ * @param {string} username - Instagram username
+ * @returns {PlatformChannel}
+ */
+function getPlatformChannel(username) {
+    var displayName = username;
+    var thumbnail = null;
+    var description = '';
+    var subscriberCount = null;
+
+    // Try web API first for richer data
+    var session = getSession();
+    if (session.lsd && session.mid) {
+        var profileData = fetchWebProfile(username, session);
+        var user = profileData && profileData.data && profileData.data.user;
+        if (user) {
+            displayName = user.full_name || user.username || displayName;
+            thumbnail = user.profile_pic_url_hd || user.profile_pic_url || thumbnail;
+            description = user.biography || description;
+            var followerCount = user.edge_followed_by && user.edge_followed_by.count;
+            if (!followerCount) followerCount = user.follower_count;
+            if (followerCount) subscriberCount = followerCount;
+        }
+    }
+
+    // Fall back to HTML meta tags, LD+JSON, and regex extraction
+    if (!thumbnail) {
+        var response = http.GET(API_URLS.base + '/' + encodeURIComponent(username) + '/', defaultHeaders(), false);
+        if (response && response.isOk) {
+            var meta = extractMetaTags(response.body);
+            if (meta) {
+                if (meta.title && displayName === username) {
+                    var match = meta.title.match(/^([^(]+)/);
+                    if (match) displayName = match[1].trim() || username;
+                }
+                thumbnail = meta.image || thumbnail;
+                if (meta.description && !description) description = meta.description;
+            }
+
+            // Try LD+JSON profile data
+            if (!thumbnail || displayName === username) {
+                try {
+                    var ldProfile = extractLdProfile(response.body);
+                    if (ldProfile && ldProfile.user) {
+                        if (displayName === username) displayName = ldProfile.user.name || displayName;
+                        if (!thumbnail) thumbnail = ldProfile.user.image || thumbnail;
+                        if (ldProfile.user.subscriberCount) subscriberCount = ldProfile.user.subscriberCount;
+                    }
+                } catch {}
+            }
+
+            // Try regex extraction from raw HTML
+            if (!thumbnail || displayName === username) {
+                try {
+                    var htmlMeta = extractChannelMetadataFromHtml(response.body, username);
+                    if (htmlMeta) {
+                        if (htmlMeta.name && displayName === username) displayName = htmlMeta.name;
+                        if (htmlMeta.thumbnail && !thumbnail) thumbnail = htmlMeta.thumbnail;
+                        if (htmlMeta.subscribers && !subscriberCount) subscriberCount = htmlMeta.subscribers;
+                    }
+                } catch {}
+            }
+        }
+    }
+
+    // Kittygram fallback for any missing data
+    if (!subscriberCount || !thumbnail || displayName === username) {
+        try {
+            var kgResult = fetchFromKittygram(username);
+            if (kgResult && kgResult.profile) {
+                if (kgResult.profile.name && displayName === username) displayName = kgResult.profile.name;
+                if (kgResult.profile.thumbnail && !thumbnail) thumbnail = kgResult.profile.thumbnail;
+                if (kgResult.profile.followers && !subscriberCount) subscriberCount = kgResult.profile.followers;
+                if (kgResult.profile.bio && !description) description = kgResult.profile.bio;
+            }
+        } catch (e) {
+            log('getPlatformChannel: Kittygram fallback error: ' + e);
+        }
+    }
+
+    return new PlatformChannel({
+        id: new PlatformID(platform.title, username, config.id),
+        name: displayName,
+        thumbnail: thumbnail || platform.icon,
+        banner: thumbnail || '',
+        subscribers: subscriberCount,
+        description: description,
         url: API_URLS.base + '/' + encodeURIComponent(username) + '/',
         links: {}
     });
@@ -1035,30 +647,28 @@ function parseChannelFromCard(card) {
  * @returns {PlatformChannel[]} Array of matching PlatformChannel objects
  */
 function searchKittygramChannels(query) {
-    var kgHeaders = {
-        'User-Agent': USER_AGENT,
-        'Sec-Fetch-Mode': 'navigate'
-    };
-    var instances = getKittygramInstances();
     var channels = [];
 
-    instances.some(function(instance) {
+    // Try each Kittygram instance until we find results
+    getKittygramInstances().some(function(instance) {
         try {
             var url = instance + '/search?q=' + encodeURIComponent(query);
-            log('searchKittygramChannels: trying ' + url);
-            var resp = http.GET(url, kgHeaders, false);
+            var resp = http.GET(url, { 'User-Agent': USER_AGENT, 'Sec-Fetch-Mode': 'navigate' }, false);
+
             if (resp && resp.isOk && resp.body) {
-                var doc = domParser.parseFromString(resp.body, 'text/html');
-                var userCards = doc.querySelectorAll('.user-info.item-card.search-result');
-                userCards.forEach(function(card) {
-                    var ch = parseChannelFromCard(card);
-                    if (ch) channels.push(ch);
+                // Parse search results and extract channel cards
+                var cards = domParser.parseFromString(resp.body, 'text/html').querySelectorAll('.user-info.item-card.search-result');
+                cards.forEach(function(card) {
+                    const channel = parseChannelFromCard(card);
+                    if (channel) 
+                        channels.push(channel);
                 });
-                log('searchKittygramChannels: found ' + channels.length + ' results from ' + instance);
-                if (channels.length > 0) return true;
+
+                if (channels.length > 0) 
+                    return true; // Stop trying instances
             }
         } catch (e) {
-            log('searchKittygramChannels: error: ' + e);
+            log('Kittygram channel search failed: error: ' + e);
         }
         return false;
     });
@@ -1356,7 +966,7 @@ function getChannelContentPager(url, type, order, filters, continuationToken, qu
                 id: new PlatformID(platform.title, sc, config.id),
                 name: title,
                 thumbnails: new Thumbnails([new Thumbnail(itemThumb, 0)]),
-                author: new PlatformAuthorLink(new PlatformID(platform.title, username, config.id), username, url, profileThumbnail),
+                author: getAuthor(username, url, profileThumbnail),
                 datetime: datetime,
                 duration: duration,
                 viewCount: itemLikes,
@@ -1367,7 +977,7 @@ function getChannelContentPager(url, type, order, filters, continuationToken, qu
             }) : new PlatformPostDetails({
                 id: new PlatformID(platform.title, sc, config.id),
                 name: title,
-                author: new PlatformAuthorLink(new PlatformID(platform.title, username, config.id), username, url, profileThumbnail),
+                author: getAuthor(username, url, profileThumbnail),
                 datetime: datetime,
                 url: postUrl,
                 description: itemCaption || '',
@@ -2249,6 +1859,220 @@ function fetchKittygramPostData(shortcode) {
 
     if (result) return result;
     return { videoUrl: null, thumbnail: null, caption: null, author: null, authorThumb: '', datetime: null, likes: null, duration: null };
+}
+
+/**
+ * Fetches and parses all available metadata for a post/reel.
+ * Tries Kittygram, Instagram page meta tags, LD+JSON, __a=1, and web_profile_info fallback.
+ * @param {string} shortcode - Post/reel shortcode
+ * @param {string} stringUrl - Original URL string
+ * @param {boolean} isReel - Whether this is a reel URL
+ * @returns {Object} { title, description, thumbnail, authorName, authorThumb, datetime, likes, duration, videoUrl }
+ */
+function fetchContentMetadata(shortcode, stringUrl, isReel) {
+    var title = 'Instagram Post';
+    var description = '';
+    var thumbnail = '';
+    var authorName = 'Unknown';
+    var authorThumb = '';
+    var datetime = null;
+    var likes = null;
+    var duration = null;
+    var videoUrl = null;
+
+    // Try Kittygram first
+    try {
+        var kgPost = fetchKittygramPostData(shortcode);
+        if (kgPost.videoUrl) {
+            videoUrl = kgPost.videoUrl;
+        }
+        if (kgPost.thumbnail) thumbnail = kgPost.thumbnail;
+        if (kgPost.caption) {
+            title = kgPost.caption.substring(0, 100);
+            description = kgPost.caption;
+        }
+        if (kgPost.author) authorName = kgPost.author;
+        if (kgPost.datetime) datetime = kgPost.datetime;
+        if (kgPost.likes) likes = kgPost.likes;
+        if (kgPost.duration) duration = kgPost.duration;
+        if (kgPost.authorThumb) authorThumb = kgPost.authorThumb;
+
+        // Kittygram reels have poster="nil" — fetch channel page for thumbnail/likes
+        if ((!thumbnail || !likes) && authorName && videoUrl) {
+            var kgHeaders = { 'User-Agent': USER_AGENT, 'Sec-Fetch-Mode': 'navigate' };
+            var instances = getKittygramInstances();
+            for (var i = 0; i < instances.length; i++) {
+                var channelUrl = instances[i] + '/' + authorName;
+                var channelResp = http.GET(channelUrl, kgHeaders, false);
+                if (channelResp && channelResp.isOk && channelResp.body) {
+                    var channelDoc = domParser.parseFromString(channelResp.body, 'text/html');
+                    var allCards = channelDoc.querySelectorAll('.item-card.post');
+                    for (var c = 0; c < allCards.length; c++) {
+                        var card = allCards[c];
+                        var linkInCard = card.querySelector('a[href="/p/' + shortcode + '"]');
+                        if (linkInCard) {
+                            if (!thumbnail) {
+                                var cardVideo = card.querySelector('.post-image video');
+                                if (cardVideo) {
+                                    var poster = cardVideo.getAttribute('poster');
+                                    if (poster && poster !== 'nil') thumbnail = decodeKittygramProxy(poster);
+                                }
+                                if (!thumbnail) {
+                                    var cardImg = card.querySelector('.post-image img');
+                                    if (cardImg) {
+                                        var src = cardImg.getAttribute('src');
+                                        if (src && src !== 'nil') thumbnail = decodeKittygramProxy(src);
+                                    }
+                                }
+                            }
+                            if (!likes) {
+                                var cardLikesEl = card.querySelector('.post-likes');
+                                if (cardLikesEl) {
+                                    var likesText = cardLikesEl.textContent || '';
+                                    if (likesText.toLowerCase().indexOf('nil') === -1) {
+                                        var likesMatch = likesText.match(/([\d,]+)/);
+                                        if (likesMatch) {
+                                            var likesNum = parseInt(likesMatch[1].replace(/,/g, ''), 10);
+                                            if (!isNaN(likesNum)) likes = likesNum;
+                                        }
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        log('fetchContentMetadata: Kittygram error: ' + e);
+    }
+
+    // If Kittygram gave us a video URL, return immediately
+    if (videoUrl) {
+        return { title: title, description: description, thumbnail: thumbnail, authorName: authorName, authorThumb: authorThumb, datetime: datetime, likes: likes, duration: duration, videoUrl: videoUrl, source: 'kittygram' };
+    }
+
+    // Try Instagram page
+    getSession();
+    var pageUrl = API_URLS.base + (isReel ? '/reel/' : '/p/') + shortcode + '/';
+    var pageResp = http.GET(pageUrl, defaultHeaders(), false);
+
+    if (pageResp && pageResp.isOk && pageResp.body) {
+        var meta = extractMetaTags(pageResp.body);
+        if (meta) {
+            if (meta.title && meta.title !== 'Instagram') title = meta.title;
+            if (meta.description) description = meta.description;
+            if (meta.image) thumbnail = meta.image;
+        }
+        if (!meta || !meta.image || meta.title === 'Instagram') {
+            var htmlMeta = extractPostMetadataFromHtml(pageResp.body, shortcode);
+            if (htmlMeta) {
+                if (htmlMeta.title) title = htmlMeta.title;
+                if (htmlMeta.description) description = htmlMeta.description;
+                if (htmlMeta.thumbnail) thumbnail = htmlMeta.thumbnail;
+                if (htmlMeta.author) authorName = htmlMeta.author;
+                if (htmlMeta.datetime) datetime = htmlMeta.datetime;
+            }
+        }
+
+        var authorMatch = title.match(/^([^|]+?)\s+on\s+Instagram/);
+        if (authorMatch) authorName = authorMatch[1].trim();
+
+        // LD+JSON extraction
+        var ldVideoData = null;
+        try {
+            var ldDoc = domParser.parseFromString(pageResp.body, 'text/html');
+            var ldScripts = ldDoc.querySelectorAll('script[type="application/ld+json"]');
+            for (var si = 0; si < ldScripts.length; si++) {
+                var ldData = JSON.parse(ldScripts[si].textContent);
+                var ldItems = Array.isArray(ldData) ? ldData : [ldData];
+                for (var li = 0; li < ldItems.length; li++) {
+                    if (ldItems[li]['@type'] === 'ImageObject' && ldItems[li].contentUrl && thumbnail.indexOf(ldItems[li].contentUrl) === -1) {
+                        // note: we don't push to an array here, just capture for later
+                    }
+                    if (ldItems[li].author && ldItems[li].author.name) authorName = ldItems[li].author.name;
+                    if (ldItems[li]['@type'] === 'VideoObject' || (Array.isArray(ldItems[li]['@type']) && ldItems[li]['@type'].includes('VideoObject'))) {
+                        ldVideoData = ldItems[li];
+                    }
+                }
+            }
+        } catch {}
+
+        if (ldVideoData) {
+            if (ldVideoData.author && ldVideoData.author.name) authorName = ldVideoData.author.name;
+            if (ldVideoData.uploadDate) {
+                var ldDatetime = parseDatetimeToUnix(ldVideoData.uploadDate);
+                if (ldDatetime) datetime = ldDatetime;
+            }
+            if (ldVideoData.thumbnailUrl && !thumbnail) thumbnail = ldVideoData.thumbnailUrl;
+            if (ldVideoData.description && !description) description = ldVideoData.description;
+        }
+    }
+
+    // Fetch video URL
+    videoUrl = fetchVideoUrl(shortcode);
+
+    // Fallback: web_profile_info lookup
+    if (!videoUrl) {
+        var usernameFromUrl = null;
+        try {
+            var pathSegments = new URL(stringUrl).pathname.replace(/\/$/, '').split('/').filter(Boolean);
+            if (pathSegments.length >= 3) usernameFromUrl = pathSegments[0];
+        } catch {}
+        if (usernameFromUrl) {
+            try {
+                var fbSession = getSession();
+                if (fbSession.lsd && fbSession.mid) {
+                    var profileData = fetchWebProfile(usernameFromUrl, fbSession);
+                    if (profileData && profileData.data && profileData.data.user) {
+                        var userObj = profileData.data.user;
+                        var mediaSources = [userObj.edge_owner_to_timeline_media, userObj.edge_felix_video_timeline];
+                        for (var si = 0; si < mediaSources.length && !videoUrl; si++) {
+                            var conn = mediaSources[si];
+                            if (conn && conn.edges) {
+                                for (var ei = 0; ei < conn.edges.length; ei++) {
+                                    var node = conn.edges[ei].node;
+                                    if (node && node.shortcode === shortcode && node.video_versions && node.video_versions.length > 0) {
+                                        videoUrl = node.video_versions[0].url;
+                                        videoUrlCache[shortcode] = videoUrl;
+                                        if (node.owner && node.owner.username) authorName = node.owner.username;
+                                        if (node.taken_at_timestamp) datetime = node.taken_at_timestamp;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                log('fetchContentMetadata: web_profile_info fallback error: ' + e);
+            }
+        }
+    }
+
+    // __a=1 metadata retry
+    if (videoUrl && (!thumbnail || thumbnail === platform.icon || title === 'Instagram Post')) {
+        try {
+            var a1Url = API_URLS.base + (isReel ? '/reel/' : '/p/') + shortcode + '/?__a=1';
+            var a1Resp = http.GET(a1Url, defaultHeaders(), false);
+            if (a1Resp && a1Resp.isOk && a1Resp.body) {
+                var a1Meta = extractPostMetadataFromHtml(a1Resp.body, shortcode);
+                if (a1Meta) {
+                    if (a1Meta.title && (title === 'Instagram Post' || !title)) title = a1Meta.title;
+                    if (a1Meta.thumbnail && (!thumbnail || thumbnail === platform.icon)) thumbnail = a1Meta.thumbnail;
+                    if (a1Meta.author && authorName === 'Unknown') authorName = a1Meta.author;
+                    if (a1Meta.datetime && !datetime) datetime = a1Meta.datetime;
+                    if (a1Meta.description && !description) description = a1Meta.description;
+                }
+            }
+        } catch (e) {
+            log('fetchContentMetadata: __a=1 metadata error: ' + e);
+        }
+    }
+
+    log('fetchContentMetadata: using Instagram data ' + videoUrl);
+    return { title: title, description: description, thumbnail: thumbnail, authorName: authorName, authorThumb: authorThumb, datetime: datetime, likes: likes, duration: duration, videoUrl: videoUrl, source: 'instagram' };
 }
 
 /**
@@ -3608,19 +3432,24 @@ function extractScreenshotVideo(html) {
 }
 
 /**
+ * Parses a URL string into its non-empty path segments.
+ * @param {string} url - The URL to parse
+ * @returns {string[]|null} Array of path segments, or null if the URL is invalid
+ */
+function urlSegments(url) {
+    try {
+        return new URL(url).pathname.replace(/\/$/, '').split('/').filter(Boolean);
+    } catch { return null; }
+}
+
+/**
  * Extracts the username from an Instagram profile URL
  * @param {string} url - Full Instagram URL (e.g. https://www.instagram.com/username/)
  * @returns {string|null} Username, or null
  */
 function extractUsername(url) {
-    try {
-        const parsed = new URL(url);
-        const pathname = parsed.pathname.replace(/\/$/, '');
-        const parts = pathname.split('/').filter(Boolean);
-        return parts.length > 0 ? parts[0] : null;
-    } catch {
-        return null;
-    }
+    var p = urlSegments(url);
+    return p && p.length > 0 ? p[0] : null;
 }
 
 /**

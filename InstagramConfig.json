@@ -34,6 +34,9 @@
   "changelog": {
     "1": [
       "Initial release"
+    ],
+    "2": [
+      "Code restructure & efficiency improvements"
     ]
   },
   "settings": [
