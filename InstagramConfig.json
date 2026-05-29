@@ -7,10 +7,10 @@
   "sourceUrl": "https://raw.githubusercontent.com/b-risk/Grayjay-Instagram/refs/heads/main/InstagramConfig.json",
   "scriptUrl": "./InstagramScript.js",
   "repositoryUrl": "https://github.com/b-risk/Grayjay-Instagram",
-  "version": 2,
+  "version": 3,
   "iconUrl": "./Imgs/InstagramIcon.png",
   "id": "859124b7-b79e-4340-b8a0-a1360a2bc939",
-  "scriptSignature": "sfzzvYTwINAtEP8aw8HSspxsvEsAhBpLWnRP7HedjLFW4RNphzCW7oioSCYDNbzu2hj9GPym27BsH1NYpOTHt8GVQF/4fBpS7IUqJENdy5ZLplxY6rtKxkRsOJAzQw05dGPnJ4CW5XB9Z24YdqUmNl8OWYIsyAGrHkSKwVbY8nUjWMA2U0EfErXsw0rRyR8yoJiU6Jl6pTbhJnJE1KejY++rqdJMAbtJUWUdmJx6K/dMbMddKS0TYYwrx+DEUbuEpIqGNGq069ZikjNMUUqdpJGiHUcxPpbi9bGtxQiUh2IoIE45yDQy/x3mog1XCKdamhqpHjQf7F1LhuITB97tAg==",
+  "scriptSignature": "QzrIvPeBXCuRKWSPo4F5npW4v86KlEzys+xp5WpOM7/maNTz9rFBktK3kSuL0iNk5eeXPOd1tbFd0V+sq4C7mJaESw7MToI4E/AhJwQ7/TPMTgcEBcpfP7/lOnpZKsVo8/pq80PYoDyuiwGxEMcQqe5vrwgtVbzo9lOsbKWfZyW6P34G473RTztXfvWNE9vZXQroskDHWClU3nlKUPBrG+9zjMt/9eebkUuH7ND1Kxgepn9iA3hddRpvjBYWN7vkPUE13ujbS3KKLUyggVzt23Fyeak1+YZnTaHj0BUJ8+DDCbnU8PGurPQ0uGvkwysA7MQGppRBGfZ21lNyPUzakQ==",
   "scriptPublicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzqO5lakY+6LDum8qWCfjLe8TBifJvxVxQ8PXDfiKY4/9REShniiayh4x2Bhf7FN4iNg7b7TE4rXbGkzyMVNW+JRpw+UexYd5eqdwIJTSF6H+7F6wOWKi6bWxkPnKxGe4mOfamEKn+FJwkJ56qTpM4SZ4EDjyJaKjIOkMC0KgpqH9FpuYibwknBF2+7f7N4rUQgGKRR6nKbMdFjKOkHiRswhTFKzKJE8YjeVhu97jFhQIEOSawdwrcG8dCqsVz6VYtACN3xfewiUAF/04HJRGPb0dm3QsQzbSaBu0D5pN1LV3z7Tlq7yCCHhuenusEovPwCVOWJ/dyaQFFer3Mqw8uwIDAQAB",
   "packages": [
     "Http",
