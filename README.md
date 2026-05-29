@@ -35,5 +35,5 @@ ssh-keygen -t rsa -b 2048 -m PEM -f ./Signatures/private-key.pem
 export SIGNING_PRIVATE_KEY="$(base64 -w 0 ./Signatures/private-key.pem)"
 
 # Run the sign script (use git bash on Windows):
-sh ./sign-script.sh ./Signatures/InstagramScript.js ./Signatures/InstagramConfig.json
+sh ./sign-script.sh ./InstagramScript.js ./InstagramConfig.json
 ```
