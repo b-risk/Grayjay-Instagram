@@ -1,29 +1,31 @@
-// ─── Platform Information ───────────────────────────────────────────────
+// Platform Information
 const platform = {
     title: 'Instagram',
     regular_url: 'https://www.instagram.com',
     url: 'https://www.instagram.com/',
     icon: 'https://static.cdninstagram.com/rsrc.php/yn/r/Puw_9ASeZc1.webp',
-    banner: 'https://raw.githubusercontent.com/username/Grayjay-Instagram/main/Imgs/channel-banner.jpg',
+    banner: 'https://raw.githubusercontent.com/b-risk/Grayjay-Instagram/main/Imgs/channel-banner.png',
     description: 'Instagram is a photo and video sharing social networking service owned by Meta Platforms.'
 };
 
-// ─── API URLs ──────────────────────────────────────────────────────────
-const API_URLS = {
-    base: 'https://www.instagram.com',
-    graphql: '/graphql/query/',
-    homepage: '/',
-    embed: '/embed/',
-    api_v1: '/api/v1/',
-    upload: '/upload/'
-};
+// Non-user paths
+const EXCLUDED_USER_PATHS = [
+    'reel', 
+    'p', 
+    'explore', 
+    'accounts', 
+    'direct', 
+    'stories', 
+    'saved', 
+    'search', 
+    'tags', 
+    'about', 
+    'legal', 
+    'help', 
+    'blog'
+];
 
-// ─── Constants ──────────────────────────────────────────────────────────
-const USER_AGENT = 'Mozilla/5.0';
-const IG_APP_ID = '1217981644879628';
-const IG_APP_ID_ALT = '936619743392459'; // Alternate app ID used by drawrowfly/instagram-scraper
-const EXCLUDED_USER_PATHS = ['reel', 'p', 'explore', 'accounts', 'direct', 'stories', 'saved', 'search', 'tags', 'about', 'legal', 'help', 'blog'];
-
+// Current list of Kittygram instances
 const KITTYGRAM_INSTANCES = [
     'https://kittygram.irelephant.net',
     'https://kittygr.am',
@@ -33,32 +35,18 @@ const KITTYGRAM_INSTANCES = [
     'https://kittygram.nexussfan.cz'
 ];
 
-// Known GraphQL query hashes for Instagram's web client.
-// These map to specific queries and may change when Instagram updates their codebase.
-const QUERY_HASHES = {
-    userInfo: 'c9100bf9110dd6361671f113dd02e7b6',          // user() by username
-    userMedia: '42323d64886122307be10013ad2dcc44',          // edge_owner_to_timeline_media
-    reelMedia: 'b3055c01c4f53b8a1c3c5b7b8f0c5e5b',         // edge_felix_video_timeline
-    mediaInfo: '2befcba8c35175b2f80c75e2f2c2fcec'          // shortcode_media()
-};
-
-// ─── State ─────────────────────────────────────────────────────────────
+// State
 let config = {};
 let settings = {};
-let lsdToken = null;
-let midCookie = null;
-let cookieStore = '';        // All cookies captured from Instagram, sent back on requests
 let videoUrlCache = {};      // shortcode → video URL (cached from feed API)
 let feedItemCache = {};      // shortcode → feed item data (cached for reuse)
 let thumbnailCache = {};     // shortcode → resolved thumbnail URL (from getChannelContents)
 let likesCache = {};         // shortcode → like count (from channel feed cards)
 let datetimeCache = {};      // shortcode → datetime (from channel feed cards)
+let commentCache = {};       // shortcode → InstagramCommentPager (from comment fetches)
+let pageHtmlCache = {};      // shortcode → raw Kittygram post page HTML (for comment reuse)
 
-// ═══════════════════════════════════════════════════════════════════════
-// SOURCE FUNCTIONS
-// ═══════════════════════════════════════════════════════════════════════
-
-// Called by Grayjay when the plugin is first loaded
+// Source enable
 source.enable = function (conf, _settings) {
     config = conf;
     settings = _settings;
@@ -67,7 +55,6 @@ source.enable = function (conf, _settings) {
 
 // Returns the home feed (empty for logged-out Instagram)
 source.getHome = function () {
-    throw new ScriptException(String(isUrlType("https://www.instagram.com/officialjadenwilliams/")));
     return new ContentPager([]);
 }
 
@@ -149,46 +136,64 @@ source.getChannelCapabilities = function () {
 
 // Detect channel URL
 source.isChannelUrl = function (url) {
-    return isUrlType(url);
+    const segments = urlSegments(url);
+
+    return segments && segments.length <= 1 && (segments.length === 0 || !EXCLUDED_USER_PATHS.includes(segments[0]));
 }
 
 // Detect video/reel URL
 source.isContentDetailsUrl = function (stringUrl) {
-    return isUrlType(stringUrl, ['p', 'reel']);
+    const segments = urlSegments(stringUrl);
+
+    return segments && segments.length === 2 && (segments[0] === 'p' || segments[0] === 'reel');
 }
 
 // Get video details for Instagram reels
 source.getContentDetails = function (stringUrl) {
-    var segments = urlSegments(stringUrl);
-    if (!segments) 
-        throw new ScriptException('Invalid Instagram URL');
+    // Extract shortcode from URL
+    const segments = urlSegments(stringUrl);
+    if (!segments)
+       throw new ScriptException('Invalid Instagram URL');
 
-    var isReel = segments[0] === 'reel';
-    var shortcode = isReel ? segments[1] : (segments[0] === 'p' ? segments[1] : null);
+    const isReel = segments[0] === 'reel';
+    let shortcode = isReel ? segments[1] : (segments[0] === 'p' ? segments[1] : null);
+    if (!shortcode)
+       throw new ScriptException('Invalid Instagram URL');
 
-    if (!shortcode) 
-        throw new ScriptException('Invalid Instagram URL');
-
-    if (videoUrlCache[shortcode]) {
+    // Return cached data if available
+    const cachedVideoUrl = videoUrlCache[shortcode];
+    if (cachedVideoUrl) {
         log('getContentDetails: using cached video URL for ' + shortcode);
-        var cachedMeta = parseCachedItem(feedItemCache[shortcode] || null);
-        cachedMeta.videoUrl = videoUrlCache[shortcode];
-        return getVideoDetails(cachedMeta, shortcode, stringUrl, '', null, false);
+        const cachedMeta = feedItemCache[shortcode] || {
+            title: 'Instagram Post', description: '', thumbnail: '',
+            authorName: 'Unknown', authorThumb: '', datetime: null,
+            duration: null, videoUrl: null
+        };
+        cachedMeta.videoUrl = cachedVideoUrl;
+        return getVideoDetails(cachedMeta, shortcode, stringUrl, '', null);
     }
 
-    var meta = fetchContentMetadata(shortcode, stringUrl, isReel);
-    if (!meta.videoUrl) 
-        throw new ScriptException('Video not found');
+    // Fetch fresh metadata from Kittygram
+    const kgPost = fetchKittygramPostData(shortcode);
+    if (!kgPost.videoUrl)
+       throw new ScriptException('Video not found');
 
-    return getVideoDetails(meta, shortcode, stringUrl,
-        meta.authorThumb || '',
-        meta.likes,
-        meta.source === 'kittygram'
-    );
+    return getVideoDetails({
+        title: kgPost.caption ? kgPost.caption.substring(0, 100) : 'Instagram Post',
+        description: kgPost.caption || '',
+        thumbnail: kgPost.thumbnail || '',
+        authorName: kgPost.author || 'Unknown',
+        authorThumb: kgPost.authorThumb || '',
+        datetime: kgPost.datetime,
+        likes: kgPost.likes,
+        duration: kgPost.duration,
+        videoUrl: kgPost.videoUrl
+    }, shortcode, stringUrl, kgPost.authorThumb || '', kgPost.likes);
 }
 
 // Get photo post details
 source.getPost = function (stringUrl) {
+    // Extract shortcode from URL and fetch post metadata via Kittygram
     const segments = urlSegments(stringUrl);
     if (!segments || segments.length < 2) 
         throw new ScriptException('Invalid Instagram post URL');
@@ -197,25 +202,33 @@ source.getPost = function (stringUrl) {
     if (!shortcode) 
         throw new ScriptException('Invalid Instagram post URL');
 
-    const meta = fetchPostMetadata(shortcode);
+    const post = fetchKittygramPostData(shortcode);
+    const title = (post.caption || 'Instagram Post').substring(0, 100);
+    const authorName = post.author || 'Unknown';
+    // Only populate images[] for actual image posts (carousel or single image).
+    // Reels/video posts should have images[] empty — thumbnail is set separately.
+    const images = post.images && post.images.length > 0
+        ? post.images
+        : (!post.videoUrl && post.thumbnail ? [post.thumbnail] : []);
 
     return new PlatformPostDetails({
         id: new PlatformID(platform.title, shortcode, config.id),
-        name: meta.title.substring(0, 100),
-        author: getAuthor(meta.authorName, API_URLS.base + '/' + encodeURIComponent(meta.authorName) + '/', ''),
-        datetime: meta.datetime,
+        name: title,
+        author: getAuthor(authorName, platform.url + encodeURIComponent(authorName) + '/', ''),
+        datetime: post.datetime,
         url: stringUrl,
-        description: meta.description,
-        images: meta.images,
+        description: post.caption || '',
+        images: images,
+        thumbnails: images.map(function(img) { return new Thumbnails([new Thumbnail(img, 0)]); }),
         textType: Type.Text.Raw,
-        content: meta.description,
-        thumbnails: []
+        content: post.caption || ''
     });
 }
 
 // Get comments for a post
 source.getComments = function (stringUrl) {
-    var segments = urlSegments(stringUrl);
+    // Extract shortcode from URL and fetch comments via Kittygram
+    const segments = urlSegments(stringUrl);
     if (!segments || segments.length < 2) 
         return new InstagramCommentPager([], false);
     
@@ -243,24 +256,16 @@ source.getChannelTemplateByClaimMap = function () {
     return {};
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// HELPER FUNCTIONS
-// ═══════════════════════════════════════════════════════════════════════
+
+// Utility Functions
 
 /**
- * Checks a URL against a URL type pattern.
- * @param {string} url - The URL to check
- * @param {string[]} [prefixes] - Array of valid first-segment prefixes (e.g. ['p','reel']). Omit or pass falsy for channel mode.
- * @returns {boolean}
+ * Performs a Kittygram HTTP GET with standard headers.
+ * @param {string} url - Full URL to fetch
+ * @returns {Object|null} HTTP response object
  */
-function isUrlType(url, prefixes) {
-    var p = urlSegments(url);
-    if (!prefixes) {
-        // Channel: 0 segments (root URL) or 1 segment not in excluded paths
-        return p !== null && p.length <= 1 && (p.length === 0 || !EXCLUDED_USER_PATHS.includes(p[0]));
-    }
-    // Content: exactly 2 segments, first matches a prefix, second is the ID
-    return p !== null && p.length === 2 && prefixes.indexOf(p[0]) !== -1 && p[1].length > 0;
+function httpGET(url) {
+    return http.GET(url, { 'User-Agent': 'Mozilla/5.0', 'Sec-Fetch-Mode': 'navigate' }, false);
 }
 
 /**
@@ -270,49 +275,49 @@ function isUrlType(url, prefixes) {
  * @param {number} videoDatetime - Video datetime (optional, defaults to 0)
  * @returns {Array} Array of PlatformComment
  */
-function parseKittygramPostPageComments(html, shortcode, videoDatetime) {
-    var comments = [];
-    if (!videoDatetime) videoDatetime = 0;
+function parseKittygramPostPageComments(html, shortcode, videoDatetime = 0) {
+    const comments = [];
 
     try {
-        log('parseKittygramPostPageComments: html length=' + html.length);
-        var doc = domParser.parseFromString(html, 'text/html');
-        var commentArticles = doc.querySelectorAll('.comments article');
-        log('parseKittygramPostPageComments: found ' + commentArticles.length + ' articles');
+        const doc = domParser.parseFromString(html, 'text/html');
+        const commentArticles = doc.querySelectorAll('.comments article');
 
+        // Parse each comment article into a PlatformComment
         commentArticles.forEach(function(article, idx) {
-            var header = article.querySelector('.user-info');
-            var avatarImg = header ? header.querySelector('img') : null;
-            var authorLink = article.querySelector('a.username');
-            var textEl = article.querySelector('p.comment-text');
+            const header = article.querySelector('.user-info');
+            const textEl = article.querySelector('p.comment-text');
+            
+            const avatarImg = header ? header.querySelector('img') : null;
+            const authorLink = article.querySelector('a.username');
 
             if (authorLink && textEl) {
-                var author = authorLink.textContent.trim();
-                var text = textEl.textContent.trim();
-                var avatar = platform.icon;
+                const author = authorLink.textContent.trim();
+                const text = textEl.textContent.trim();
+                let avatar = platform.icon;
+
+                // Decode Kittygram-proxied avatar URL if available
                 if (avatarImg) {
-                    var avatarSrc = avatarImg.getAttribute('src');
-                    if (avatarSrc) {
-                        avatar = decodeKittygramProxy(avatarSrc);
-                    }
+                    const avatarSrc = avatarImg.getAttribute('src');
+                    if (avatarSrc)
+                       avatar = decodeKittygramProxy(avatarSrc);
                 }
 
                 if (author && text) {
                     comments.push(new PlatformComment({
+                        // Unique ID: shortcode + "_c" + comment index (e.g. "ABC123_c0")
+                        // Kittygram comments don't contain extra metadata like datetime, ratings, etc
                         id: new PlatformID(platform.title, shortcode + '_c' + idx, config.id),
-                        author: getAuthor(author, API_URLS.base + '/' + encodeURIComponent(author) + '/', avatar),
+                        author: getAuthor(author, platform.url + encodeURIComponent(author), avatar),
                         message: text
                     }));
                 }
             }
         });
-
-        log('parseKittygramPostPageComments: parsed ' + comments.length + ' comments');
     } catch (e) {
         log('parseKittygramPostPageComments: error: ' + e);
     }
 
-            return comments;
+    return comments;
 }
 
 /**
@@ -322,20 +327,24 @@ function parseKittygramPostPageComments(html, shortcode, videoDatetime) {
  * @returns {number} Unix timestamp in seconds, or 0 if not found
  */
 function extractPostDatetime(postDoc) {
-    var bodyText = postDoc.body ? postDoc.body.textContent : '';
-    var timeEl = postDoc.querySelector('time.post-time');
+    const bodyText = postDoc.body ? postDoc.body.textContent : '';
+    const timeEl = postDoc.querySelector('time.post-time');
     if (timeEl) {
-        var dtAttr = timeEl.getAttribute('datetime');
+        const dtAttr = timeEl.getAttribute('datetime');
         if (dtAttr) {
-            var parsed = parseDatetimeToUnix(dtAttr);
-            if (parsed !== null) return parsed;
+            const parsed = parseDatetimeToUnix(dtAttr);
+            if (parsed)
+               return parsed;
         }
     }
-    var timeMatch = bodyText.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/);
+
+    const timeMatch = bodyText.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})/);
     if (timeMatch) {
-        var parsed2 = parseDatetimeToUnix(timeMatch[1] + ' ' + timeMatch[2]);
-        if (parsed2 !== null) return parsed2;
+        const parsed2 = parseDatetimeToUnix(timeMatch[1] + ' ' + timeMatch[2]);
+        if (parsed2)
+           return parsed2;
     }
+
     return 0;
 }
 
@@ -346,93 +355,53 @@ function extractPostDatetime(postDoc) {
  * @returns {InstagramCommentPager}
  */
 function getCommentsPager(shortcode) {
-    var instances = getKittygramInstances();
-    var found = null;
-    instances.some(function(instance) {
+    if (commentCache[shortcode])
+       return commentCache[shortcode];
+
+    const instances = getKittygramInstances();
+    let found = null;
+
+    // Reuse HTML cached by fetchKittygramPostData if available (common flow:
+    // user opens video details first, then scrolls to comments)
+    const cachedHtml = pageHtmlCache[shortcode];
+    if (cachedHtml) {
         try {
-            var url = instance + '/p/' + shortcode;
-            log('getCommentsPager: trying ' + url);
-            var resp = http.GET(url, { 'User-Agent': USER_AGENT, 'Sec-Fetch-Mode': 'navigate' }, false);
-            if (resp && resp.isOk && resp.body) {
-                var postDoc = domParser.parseFromString(resp.body, 'text/html');
-                var videoDatetime = datetimeCache[shortcode] || extractPostDatetime(postDoc);
-                var comments = parseKittygramPostPageComments(resp.body, shortcode, videoDatetime);
-                log('getCommentsPager: found ' + comments.length + ' comments from ' + instance);
-                found = new InstagramCommentPager(comments, false, { shortcode: shortcode, instance: instance });
-                return true;
-            }
+            const postDoc = domParser.parseFromString(cachedHtml, 'text/html');
+            const videoDatetime = datetimeCache[shortcode] || extractPostDatetime(postDoc);
+            const comments = parseKittygramPostPageComments(cachedHtml, shortcode, videoDatetime);
+            found = new InstagramCommentPager(comments, false, { shortcode: shortcode, instance: '' });
         } catch (e) {
-            log('getCommentsPager: error: ' + e);
+            log('getCommentsPager: cached HTML parse error: ' + e);
         }
-        return false;
-    });
-    if (found) return found;
-    showToast('Failed to load comments');
+    }
+
+    if (!found) {
+        instances.some(function(instance) {
+            try {
+                const resp = httpGET(instance + '/p/' + shortcode);
+
+                if (resp && resp.isOk && resp.body) {
+                    const postDoc = domParser.parseFromString(resp.body, 'text/html');
+                    const videoDatetime = datetimeCache[shortcode] || extractPostDatetime(postDoc);
+                    const comments = parseKittygramPostPageComments(resp.body, shortcode, videoDatetime);
+                    found = new InstagramCommentPager(comments, false, { shortcode: shortcode, instance: instance });
+                    return true;
+                }
+            } catch (e) {
+                log('getCommentsPager: error: ' + e);
+            }
+            return false;
+        });
+    }
+
+    if (found) {
+       commentCache[shortcode] = found;
+       return found;
+    }
+    bridge.toast('Failed to load comments');
     return new InstagramCommentPager([], false, { shortcode: shortcode });
 }
 
-/**
- * Fetches and parses metadata for a photo post from Instagram's page.
- * Tries meta tags, HTML regex, and LD+JSON extraction.
- * @param {string} shortcode - Post shortcode
- * @returns {Object} { title, description, thumbnail, authorName, datetime, images }
- */
-function fetchPostMetadata(shortcode) {
-    getSession();
-    var pageResp = http.GET(API_URLS.base + '/p/' + shortcode + '/', defaultHeaders(), false);
-    var title = 'Instagram Post';
-    var description = '';
-    var thumbnail = '';
-    var authorName = 'Unknown';
-    var datetime = null;
-    var images = [];
-
-    if (pageResp && pageResp.isOk && pageResp.body) {
-        var meta = extractMetaTags(pageResp.body);
-        if (meta) {
-            if (meta.title && meta.title !== 'Instagram') title = meta.title;
-            if (meta.description) description = meta.description;
-            if (meta.image) thumbnail = meta.image;
-        }
-        if (!meta || !meta.image || meta.title === 'Instagram') {
-            var htmlMeta = extractPostMetadataFromHtml(pageResp.body, shortcode);
-            if (htmlMeta) {
-                if (htmlMeta.title) title = htmlMeta.title;
-                if (htmlMeta.description) description = htmlMeta.description;
-                if (htmlMeta.thumbnail) thumbnail = htmlMeta.thumbnail;
-                if (htmlMeta.author) authorName = htmlMeta.author;
-                if (htmlMeta.datetime) datetime = htmlMeta.datetime;
-            }
-        }
-
-        var authorMatch = title.match(/^([^|]+?)\s+on\s+Instagram/);
-        if (authorMatch) authorName = authorMatch[1].trim();
-
-        if (thumbnail) images.push(thumbnail);
-
-        try {
-            var ldDoc = domParser.parseFromString(pageResp.body, 'text/html');
-            var ldScripts = ldDoc.querySelectorAll('script[type="application/ld+json"]');
-            for (var si = 0; si < ldScripts.length; si++) {
-                var ldData = JSON.parse(ldScripts[si].textContent);
-                var ldItems = Array.isArray(ldData) ? ldData : [ldData];
-                for (var li = 0; li < ldItems.length; li++) {
-                    if (ldItems[li]['@type'] === 'ImageObject' && ldItems[li].contentUrl && images.indexOf(ldItems[li].contentUrl) === -1) {
-                        images.push(ldItems[li].contentUrl);
-                        if (!thumbnail) thumbnail = ldItems[li].contentUrl;
-                    }
-                    if (ldItems[li].author && ldItems[li].author.name) authorName = ldItems[li].author.name;
-                    if ((ldItems[li]['@type'] === 'VideoObject' || (Array.isArray(ldItems[li]['@type']) && ldItems[li]['@type'].includes('VideoObject'))) && ldItems[li].thumbnailUrl && !thumbnail)
-                        thumbnail = ldItems[li].thumbnailUrl;
-                }
-            }
-        } catch {}
-    }
-
-    return { title: title, description: description, thumbnail: thumbnail, authorName: authorName, datetime: datetime, images: images };
-}
-
-/**
 /**
  * Creates a PlatformAuthorLink using the platform's ID format.
  * @param {string} name - Author username
@@ -441,25 +410,35 @@ function fetchPostMetadata(shortcode) {
  * @returns {PlatformAuthorLink}
  */
 function getAuthor(name, url, avatar) {
-    return new PlatformAuthorLink(new PlatformID(platform.title, name, config.id), name, url, avatar || '');
+    return new PlatformAuthorLink(
+        new PlatformID(
+            platform.title, 
+            name, 
+            config.id
+        ), 
+        name, 
+        url, 
+        avatar || ''
+    );
 }
 
 /**
  * Creates a PlatformVideoDetails from parsed metadata.
- * @param {Object} meta - Parsed metadata (from parseCachedItem or fetchContentMetadata)
+ * @param {Object} meta - Parsed metadata
  * @param {string} shortcode - Post/reel shortcode
  * @param {string} stringUrl - Original URL
  * @param {string} authorAvatar - Author avatar URL (empty string if none)
  * @param {number|null} [likes] - Like count (null if none)
- * @param {boolean} [isKittygram] - Use Kittygram video dimensions (720x1280) vs Instagram (608x1080)
  * @returns {PlatformVideoDetails}
  */
-function getVideoDetails(meta, shortcode, stringUrl, authorAvatar, likes, isKittygram) {
-    var thumbUrl = meta.thumbnail || platform.icon;
-    var videoDuration = isKittygram ? (meta.duration || 30) : (meta.duration || 30);
-    var width = isKittygram ? 720 : 608;
-    var height = isKittygram ? 1280 : 1080;
-    var codec = isKittygram ? 'avc1' : 'avc1.4d401e';
+function getVideoDetails(meta, shortcode, stringUrl, authorAvatar, likes) {
+    // Build PlatformVideoDetails with video metadata.
+    // Width, height, and codec are extracted from the Kittygram post page when available,
+    // falling back to standard 720x1280 reels defaults.
+    const thumbUrl = meta.thumbnail || platform.icon;
+    const videoWidth = meta.width || 720;
+    const videoHeight = meta.height || 1280;
+    const videoCodec = meta.codec || 'avc1';
     return new PlatformVideoDetails({
         id: new PlatformID(platform.title, shortcode, config.id),
         name: meta.title.substring(0, 100),
@@ -472,48 +451,10 @@ function getVideoDetails(meta, shortcode, stringUrl, authorAvatar, likes, isKitt
         isLive: false,
         rating: likes ? new RatingLikes(likes) : null,
         video: new VideoSourceDescriptor([new VideoUrlSource({
-            width: width, height: height, container: 'video/mp4', codec: codec,
-            name: 'mp4', bitrate: 2000000, duration: videoDuration, url: meta.videoUrl
+            width: videoWidth, height: videoHeight, container: 'video/mp4', codec: videoCodec,
+            name: 'mp4', bitrate: 2000000, duration: meta.duration || 30, url: meta.videoUrl
         })])
     });
-}
-
-/**
- * @param {Object|null} cachedItem - Cached feed item from feedItemCache
- * @returns {Object} { title, description, thumbnail, authorName, duration, datetime }
- */
-function parseCachedItem(cachedItem) {
-    var title = 'Instagram Post';
-    var description = '';
-    var thumbnail = '';
-    var authorName = 'Unknown';
-    var duration = null;
-    var datetime = null;
-
-    if (cachedItem) {
-        try { title = (cachedItem.caption && (cachedItem.caption.text || cachedItem.caption)) || title; } catch {}
-        try { description = (cachedItem.caption && (cachedItem.caption.text || cachedItem.caption)) || ''; } catch {}
-        try {
-            var versions = cachedItem.image_versions2 && cachedItem.image_versions2.candidates;
-            if (versions && versions.length > 0) thumbnail = versions[0].url;
-        } catch {}
-        try { if (cachedItem.display_url && !thumbnail) thumbnail = cachedItem.display_url; } catch {}
-        try { if (cachedItem.thumbnail_src && !thumbnail) thumbnail = cachedItem.thumbnail_src; } catch {}
-        try { if (cachedItem.thumbnail_resources && cachedItem.thumbnail_resources.length > 0 && !thumbnail) thumbnail = cachedItem.thumbnail_resources[0].url; } catch {}
-        try { if (cachedItem.video_duration) duration = Math.round(cachedItem.video_duration); } catch {}
-        try { if (cachedItem.taken_at) datetime = cachedItem.taken_at; } catch {}
-        try { if (cachedItem.user && cachedItem.user.username) authorName = cachedItem.user.username; } catch {}
-        try { if (cachedItem.owner && cachedItem.owner.username) authorName = cachedItem.owner.username; } catch {}
-    }
-
-    return {
-        title: typeof title === 'string' ? title.substring(0, 100) : 'Instagram Post',
-        description: typeof description === 'string' ? description : '',
-        thumbnail: thumbnail,
-        authorName: authorName,
-        duration: duration,
-        datetime: datetime
-    };
 }
 
 /**
@@ -522,16 +463,19 @@ function parseCachedItem(cachedItem) {
  * @returns {PlatformChannel|null} A PlatformChannel if parsing succeeds, or null if required fields are missing
  */
 function parseChannelFromCard(card) {
-    var usernameLink = card.querySelector('a.username');
-    var avatarImg = card.querySelector('img');
-    if (!usernameLink) 
-        return null;
+    // Convert a Kittygram search result card into a PlatformChannel
+    const usernameLink = card.querySelector('a.username');
+    if (!usernameLink)
+       return null;
 
-    var username = usernameLink.getAttribute('href').replace('/', '');
-    var avatar = null;
+    const avatarImg = card.querySelector('img');
+
+    const username = usernameLink.getAttribute('href').replace('/', '');
+    let avatar = null;
     if (avatarImg) {
-        var src = avatarImg.getAttribute('src');
-        if (src) avatar = decodeKittygramProxy(src);
+        const src = avatarImg.getAttribute('src');
+        if (src)
+           avatar = decodeKittygramProxy(src);
     }
     
     return new PlatformChannel({
@@ -541,7 +485,7 @@ function parseChannelFromCard(card) {
         banner: avatar || '',
         subscribers: 0,
         description: '',
-        url: API_URLS.base + '/' + encodeURIComponent(username) + '/',
+        url: platform.regular_url + '/' + encodeURIComponent(username) + '/',
         links: {}
     });
 }
@@ -553,89 +497,36 @@ function parseChannelFromCard(card) {
  * @returns {PlatformChannel}
  */
 function getPlatformChannel(username) {
-    var displayName = username;
-    var thumbnail = null;
-    var description = '';
-    var subscriberCount = null;
+    let displayName = username;
+    let thumbnail = null;
+    let description = '';
+    let subscriberCount = null;
 
-    // Try web API first for richer data
-    var session = getSession();
-    if (session.lsd && session.mid) {
-        var profileData = fetchWebProfile(username, session);
-        var user = profileData && profileData.data && profileData.data.user;
-        if (user) {
-            displayName = user.full_name || user.username || displayName;
-            thumbnail = user.profile_pic_url_hd || user.profile_pic_url || thumbnail;
-            description = user.biography || description;
-            var followerCount = user.edge_followed_by && user.edge_followed_by.count;
-            if (!followerCount) followerCount = user.follower_count;
-            if (followerCount) subscriberCount = followerCount;
+    // Fetch profile from Kittygram
+    try {
+        const kgResult = fetchFromKittygram(username);
+        if (kgResult && kgResult.profile) {
+            if (kgResult.profile.name)
+               displayName = kgResult.profile.name;
+            if (kgResult.profile.thumbnail)
+               thumbnail = kgResult.profile.thumbnail;
+            if (kgResult.profile.followers)
+               subscriberCount = kgResult.profile.followers;
+            if (kgResult.profile.bio)
+               description = kgResult.profile.bio;
         }
-    }
-
-    // Fall back to HTML meta tags, LD+JSON, and regex extraction
-    if (!thumbnail) {
-        var response = http.GET(API_URLS.base + '/' + encodeURIComponent(username) + '/', defaultHeaders(), false);
-        if (response && response.isOk) {
-            var meta = extractMetaTags(response.body);
-            if (meta) {
-                if (meta.title && displayName === username) {
-                    var match = meta.title.match(/^([^(]+)/);
-                    if (match) displayName = match[1].trim() || username;
-                }
-                thumbnail = meta.image || thumbnail;
-                if (meta.description && !description) description = meta.description;
-            }
-
-            // Try LD+JSON profile data
-            if (!thumbnail || displayName === username) {
-                try {
-                    var ldProfile = extractLdProfile(response.body);
-                    if (ldProfile && ldProfile.user) {
-                        if (displayName === username) displayName = ldProfile.user.name || displayName;
-                        if (!thumbnail) thumbnail = ldProfile.user.image || thumbnail;
-                        if (ldProfile.user.subscriberCount) subscriberCount = ldProfile.user.subscriberCount;
-                    }
-                } catch {}
-            }
-
-            // Try regex extraction from raw HTML
-            if (!thumbnail || displayName === username) {
-                try {
-                    var htmlMeta = extractChannelMetadataFromHtml(response.body, username);
-                    if (htmlMeta) {
-                        if (htmlMeta.name && displayName === username) displayName = htmlMeta.name;
-                        if (htmlMeta.thumbnail && !thumbnail) thumbnail = htmlMeta.thumbnail;
-                        if (htmlMeta.subscribers && !subscriberCount) subscriberCount = htmlMeta.subscribers;
-                    }
-                } catch {}
-            }
-        }
-    }
-
-    // Kittygram fallback for any missing data
-    if (!subscriberCount || !thumbnail || displayName === username) {
-        try {
-            var kgResult = fetchFromKittygram(username);
-            if (kgResult && kgResult.profile) {
-                if (kgResult.profile.name && displayName === username) displayName = kgResult.profile.name;
-                if (kgResult.profile.thumbnail && !thumbnail) thumbnail = kgResult.profile.thumbnail;
-                if (kgResult.profile.followers && !subscriberCount) subscriberCount = kgResult.profile.followers;
-                if (kgResult.profile.bio && !description) description = kgResult.profile.bio;
-            }
-        } catch (e) {
-            log('getPlatformChannel: Kittygram fallback error: ' + e);
-        }
+    } catch (e) {
+        log('getPlatformChannel: error: ' + e);
     }
 
     return new PlatformChannel({
         id: new PlatformID(platform.title, username, config.id),
         name: displayName,
         thumbnail: thumbnail || platform.icon,
-        banner: thumbnail || '',
+        banner: platform.banner,
         subscribers: subscriberCount,
         description: description,
-        url: API_URLS.base + '/' + encodeURIComponent(username) + '/',
+        url: platform.regular_url + '/' + encodeURIComponent(username) + '/',
         links: {}
     });
 }
@@ -647,752 +538,224 @@ function getPlatformChannel(username) {
  * @returns {PlatformChannel[]} Array of matching PlatformChannel objects
  */
 function searchKittygramChannels(query) {
-    var channels = [];
-
-    // Try each Kittygram instance until we find results
+    // Search all Kittygram instances for channels matching a query
+    const channels = [];
     getKittygramInstances().some(function(instance) {
         try {
-            var url = instance + '/search?q=' + encodeURIComponent(query);
-            var resp = http.GET(url, { 'User-Agent': USER_AGENT, 'Sec-Fetch-Mode': 'navigate' }, false);
+            const resp = httpGET(instance + '/search?q=' + encodeURIComponent(query));
 
             if (resp && resp.isOk && resp.body) {
-                // Parse search results and extract channel cards
-                var cards = domParser.parseFromString(resp.body, 'text/html').querySelectorAll('.user-info.item-card.search-result');
+                const cards = domParser.parseFromString(resp.body, 'text/html').querySelectorAll('.user-info.item-card.search-result');
                 cards.forEach(function(card) {
-                    const channel = parseChannelFromCard(card);
-                    if (channel) 
-                        channels.push(channel);
+                    const ch = parseChannelFromCard(card);
+                    if (ch)
+                       channels.push(ch);
                 });
 
-                if (channels.length > 0) 
-                    return true; // Stop trying instances
+                if (channels.length > 0)
+                   return true;
             }
         } catch (e) {
-            log('Kittygram channel search failed: error: ' + e);
+            log('searchKittygramChannels: ' + e);
         }
         return false;
     });
-
     return channels;
 }
 
+/**
+ * Gets a Kittygram instance URL by index, falling back to the first instance.
+ * @param {number} idx - Instance index
+ * @returns {string} Kittygram instance URL
+ */
 function getKittygramInstanceUrl(idx) {
+    // Get Kittygram instance URL by index, defaulting to first
     if (idx >= 0 && idx < KITTYGRAM_INSTANCES.length) {
         return KITTYGRAM_INSTANCES[idx];
     }
     return KITTYGRAM_INSTANCES[0];
 }
 
+/**
+ * Returns Kittygram instances with the user's preferred instance first.
+ * @returns {string[]} Ordered array of Kittygram instance URLs
+ */
 function getKittygramInstances() {
-    var preferredIdx = 0;
-    try {
-        if (settings && settings.kittygramInstance !== undefined) {
-            preferredIdx = parseInt(settings.kittygramInstance, 10);
-            if (isNaN(preferredIdx)) preferredIdx = 0;
-        }
-    } catch {}
-    var preferred = getKittygramInstanceUrl(preferredIdx);
-    var rest = KITTYGRAM_INSTANCES[0] === preferred
+    const preferred = getKittygramInstanceUrl(settings.kittygramInstance);
+    
+    // Sort Kittygram instances with preferred going first
+    const rest = KITTYGRAM_INSTANCES[0] === preferred
         ? KITTYGRAM_INSTANCES.slice(1)
         : KITTYGRAM_INSTANCES.filter(function(i) { return i !== preferred; });
+
     return [preferred].concat(rest);
 }
 
-function getPreferredKittygramInstance() {
-    var preferredIdx = 0;
-    try {
-        if (settings && settings.kittygramInstance !== undefined) {
-            preferredIdx = parseInt(settings.kittygramInstance, 10);
-            if (isNaN(preferredIdx)) preferredIdx = 0;
-        }
-    } catch {}
-    return getKittygramInstanceUrl(preferredIdx);
+/**
+ * Resolves the best thumbnail URL for a feed item by trying multiple source fields.
+ * Falls back to HTML metadata extraction for items without direct thumbnail fields.
+ * @param {Object} item - Feed item object
+ * @param {string} fallbackThumb - Default thumbnail (usually profile thumbnail)
+ * @param {string|null} html - Profile page HTML for HTML fallback extraction
+ * @param {string|null} shortcode - Post shortcode for HTML fallback extraction
+ * @returns {string} Resolved thumbnail URL
+ */
+function resolveItemThumbnail(item, fallbackThumb) {
+    if (item.thumbnail && item.thumbnail !== fallbackThumb)
+        return item.thumbnail;
+    return fallbackThumb;
 }
 
-function shouldUseInstagramShareUrl() {
-    try {
-        if (settings && settings.useInstagramUrlsForSharing !== undefined) {
-            return settings.useInstagramUrlsForSharing === true;
-        }
-    } catch {}
-    return false;
-}
-
-function getShareUrl(shortcode, isVideo) {
-    if (shouldUseInstagramShareUrl()) {
-        return API_URLS.base + (isVideo ? '/reel/' : '/p/') + shortcode + '/';
-    }
-    var preferredInstance = getPreferredKittygramInstance();
-    return preferredInstance + (isVideo ? '/reel/' : '/p/') + shortcode;
-}
-
+/**
+ * Gets a paginated list of channel content (posts and reels) for an Instagram user.
+ * Sources items from Kittygram API, HTML shortcode extraction, or Kittygram fallback.
+ * Supports filtering by shorts-only, text query search, and chronological sorting.
+ * @param {string} url - Channel URL
+ * @param {string} type - Feed type (Type.Feed.Shorts or Type.Feed.Mixed)
+ * @param {string} order - Sort order
+ * @param {Array} filters - Active filters
+ * @param {string|null} continuationToken - Pagination cursor for next page
+ * @param {string|null} query - Text search query within channel content
+ * @returns {InstagramVideoPager} Paginated video/post results
+ */
 function getChannelContentPager(url, type, order, filters, continuationToken, query) {
-    var username = extractUsername(url);
-    if (!username) return new VideoPager([], false);
-
-    var wantShorts = (type === Type.Feed.Shorts);
-    var queryLower = query ? query.toLowerCase() : null;
-
-    log('getChannelContents: fetching page for ' + username);
-    const response = http.GET(API_URLS.base + '/' + encodeURIComponent(username) + '/', defaultHeaders(), false);
-    if (!response || !response.isOk) {
-        log('getChannelContents: HTTP ' + (response ? response.code : 'no response'));
+    const username = extractUsername(url);
+    if (!username)
         return new VideoPager([], false);
-    }
 
-    log('getChannelContents: response length=' + response.body.length);
+    const wantShorts = (type === Type.Feed.Shorts);
+    const queryLower = query ? query.toLowerCase() : null;
 
-    if (!lsdToken || !midCookie) {
-        var profileLsd = extractLsdToken(response.body);
-        if (profileLsd) lsdToken = profileLsd;
-    }
-    if (response && response.headers) {
-        var sc = response.headers['Set-Cookie'] || response.headers['set-cookie'];
-        if (sc) {
-            var parsedCookies = parseSetCookies(sc);
-            if (parsedCookies.cookieHeader && !cookieStore) cookieStore = parsedCookies.cookieHeader;
-            if (parsedCookies.valid.mid) midCookie = parsedCookies.valid.mid;
-        }
-    }
+    let items = null;
+    let hasMore = false;
+    let nextCursor = null;
+    let kgProfile = null;
+    let kgWorkingInstance = null;
 
-    var profileThumbnail = platform.icon;
-    var meta = extractMetaTags(response.body);
-    if (meta && meta.image) profileThumbnail = meta.image;
-    try {
-        var htmlChannelMeta = extractChannelMetadataFromHtml(response.body, username);
-        if (htmlChannelMeta && htmlChannelMeta.thumbnail) profileThumbnail = htmlChannelMeta.thumbnail;
-    } catch {}
-    if (!profileThumbnail || profileThumbnail === platform.icon) {
-        try {
-            var ldProf = extractLdProfile(response.body);
-            if (ldProf && ldProf.user && ldProf.user.image) profileThumbnail = ldProf.user.image;
-        } catch {}
-    }
-    if (!profileThumbnail || profileThumbnail === platform.icon) {
-        try {
-            var session = getSession();
-            if (session.lsd && session.mid) {
-                var pd = fetchWebProfile(username, session);
-                if (pd && pd.data && pd.data.user) {
-                    profileThumbnail = pd.data.user.profile_pic_url_hd || pd.data.user.profile_pic_url || profileThumbnail;
-                }
-            }
-        } catch {}
-    }
-
-    var kgResult = null;
-    var isKittygramCursor = continuationToken && typeof continuationToken === 'string' && continuationToken.indexOf('kg_') === 0;
+    const isKittygramCursor = continuationToken && typeof continuationToken === 'string' && continuationToken.indexOf('kg_') === 0;
     if (!continuationToken || isKittygramCursor) {
-        var kgCursor = isKittygramCursor ? continuationToken.substring(3) : null;
-        log('getChannelContents: trying Kittygram with cursor=' + (kgCursor || 'null'));
-        kgResult = fetchFromKittygram(username, kgCursor);
-    }
-
-    var videos = [];
-    var seen = {};
-    var items = null;
-    var hasMore = false;
-    var nextCursor = null;
-
-    if (kgResult && kgResult.items && kgResult.items.length > 0) {
-        log('getChannelContents: using Kittygram result with ' + kgResult.items.length + ' items, hasMore=' + kgResult.hasMore);
-        items = kgResult.items;
-        hasMore = kgResult.hasMore || false;
-        nextCursor = kgResult.nextCursor ? 'kg_' + kgResult.nextCursor : null;
-        if (kgResult.profile && kgResult.profile.thumbnail && (!profileThumbnail || profileThumbnail === platform.icon)) {
-            profileThumbnail = kgResult.profile.thumbnail;
-        }
-    } else {
-        log('getChannelContents: Kittygram returned nothing, trying Instagram API');
-        var feedResult = fetchFeedItems(username, continuationToken);
-        items = feedResult ? feedResult.items : null;
-        hasMore = feedResult ? feedResult.hasMore : false;
-        nextCursor = feedResult ? feedResult.nextCursor : null;
-    }
-
-    var isHtmlFallback = false;
-    if (!items || items.length === 0) {
-        var htmlShortcodes = extractShortcodes(response.body);
-        if (htmlShortcodes && htmlShortcodes.length > 0) {
-            items = [];
-            for (var si = 0; si < htmlShortcodes.length; si++) items.push({ code: htmlShortcodes[si] });
-            isHtmlFallback = true;
+        const kgCursor = isKittygramCursor ? continuationToken.substring(3) : null;
+        const kgResult = fetchFromKittygram(username, kgCursor);
+        if (kgResult && kgResult.items && kgResult.items.length > 0) {
+            items = kgResult.items;
+            hasMore = kgResult.hasMore || false;
+            nextCursor = kgResult.nextCursor ? 'kg_' + kgResult.nextCursor : null;
+            kgProfile = kgResult.profile;
+            kgWorkingInstance = kgResult.workingInstance;
         }
     }
 
     if (!items || items.length === 0) {
-        try {
-            var fbSession = getSession();
-            if (fbSession.lsd) {
-                var a1Url = API_URLS.base + '/' + encodeURIComponent(username) + '/?__a=1';
-                var a1Headers = apiHeaders(fbSession.lsd, fbSession.mid || '');
-                a1Headers['Referer'] = url;
-                a1Headers['Accept'] = 'application/json';
-                var a1Resp = http.GET(a1Url, a1Headers, false);
-                if (a1Resp && a1Resp.isOk && a1Resp.body) {
-                    var a1Data = tryParse(a1Resp.body);
-                    if (a1Data && a1Data.graphql && a1Data.graphql.user) {
-                        var userEdge = a1Data.graphql.user.edge_owner_to_timeline_media;
-                        if (userEdge && userEdge.edges) {
-                            items = [];
-                            for (var ei = 0; ei < userEdge.edges.length; ei++) {
-                                var edge = userEdge.edges[ei];
-                                if (edge.node && edge.node.shortcode) {
-                                    var isReel = edge.node.media_type === 2 || edge.node.product_type === 'clips' || edge.node.__typename === 'XDTGraphVideo';
-                                    var isVid = edge.node.is_video || (edge.node.video_versions && edge.node.video_versions.length > 0) || edge.node.video_duration;
-                                    items.push({ code: edge.node.shortcode, id: edge.node.id, taken_at: edge.node.taken_at_timestamp, video_versions: edge.node.video_versions || null, image_versions2: edge.node.thumbnail_resources ? { candidates: edge.node.thumbnail_resources } : null, display_url: edge.node.display_url || null, thumbnail_src: edge.node.thumbnail_src || null, thumbnail_resources: edge.node.thumbnail_resources || null, caption: edge.node.edge_media_to_caption && edge.node.edge_media_to_caption.edges && edge.node.edge_media_to_caption.edges[0] ? { text: edge.node.edge_media_to_caption.edges[0].node.text } : null, product_type: isReel ? 'clips' : (isVid ? 'feed' : null), video_duration: edge.node.video_duration || null });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e) { log('getChannelContents: __a=1 error: ' + e); }
-    }
-
-    if (!items || items.length === 0) {
-        try {
-            var disUrl = API_URLS.base + '/' + encodeURIComponent(username) + '/?__a=1&__d=dis';
-            var disHeaders = defaultHeaders();
-            disHeaders['Accept'] = 'application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8';
-            var disResp = http.GET(disUrl, disHeaders, false);
-            if (disResp && disResp.isOk && disResp.body) {
-                var disData = tryParse(disResp.body);
-                if (disData) {
-                    var graphUser = null;
-                    try { graphUser = disData.graphql && disData.graphql.user; } catch {}
-                    try { if (!graphUser) graphUser = disData.data && disData.data.user; } catch {}
-                    if (graphUser) {
-                        var sources = [graphUser.edge_owner_to_timeline_media, graphUser.edge_felix_video_timeline];
-                        for (var si2 = 0; si2 < sources.length && (!items || items.length === 0); si2++) {
-                            var conn = sources[si2];
-                            if (conn && conn.edges && conn.edges.length > 0) {
-                                items = [];
-                                for (var ei2 = 0; ei2 < conn.edges.length; ei2++) {
-                                    var node = conn.edges[ei2].node;
-                                    if (!node || !node.shortcode) continue;
-                                    var isReel2 = node.media_type === 2 || node.product_type === 'clips' || node.__typename === 'XDTGraphVideo';
-                                    var isVid2 = node.is_video || (node.video_versions && node.video_versions.length > 0) || node.video_duration;
-                                    items.push({ code: node.shortcode, id: node.id, taken_at: node.taken_at_timestamp, video_versions: node.video_versions || null, image_versions2: node.thumbnail_resources ? { candidates: node.thumbnail_resources } : null, caption: node.edge_media_to_caption && node.edge_media_to_caption.edges && node.edge_media_to_caption.edges[0] ? { text: node.edge_media_to_caption.edges[0].node.text } : null, product_type: isReel2 ? 'clips' : (isVid2 ? 'feed' : null), video_duration: node.video_duration || null });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e) { log('getChannelContents: __a=1&__d=dis error: ' + e); }
-    }
-
-    if (!items || items.length === 0) {
-        try {
-            var a1bUrl = API_URLS.base + '/' + encodeURIComponent(username) + '/?__a=1';
-            var a1bHeaders = defaultHeaders();
-            a1bHeaders['Accept'] = 'application/json,text/html,*/*';
-            var a1bResp = http.GET(a1bUrl, a1bHeaders, false);
-            if (a1bResp && a1bResp.isOk && a1bResp.body) {
-                var a1bData = tryParse(a1bResp.body);
-                if (a1bData && a1bData.graphql && a1bData.graphql.user) {
-                    var userEdge2 = a1bData.graphql.user.edge_owner_to_timeline_media;
-                    if (userEdge2 && userEdge2.edges) {
-                        items = [];
-                        for (var ei3 = 0; ei3 < userEdge2.edges.length; ei3++) {
-                            var edge3 = userEdge2.edges[ei3];
-                            if (edge3.node && edge3.node.shortcode) {
-                                items.push({ code: edge3.node.shortcode, id: edge3.node.id, taken_at: edge3.node.taken_at_timestamp, video_versions: edge3.node.video_versions || null, image_versions2: edge3.node.thumbnail_resources ? { candidates: edge3.node.thumbnail_resources } : null, display_url: edge3.node.display_url || null, thumbnail_src: edge3.node.thumbnail_src || null, thumbnail_resources: edge3.node.thumbnail_resources || null, caption: edge3.node.edge_media_to_caption && edge3.node.edge_media_to_caption.edges && edge3.node.edge_media_to_caption.edges[0] ? { text: edge3.node.edge_media_to_caption.edges[0].node.text } : null, product_type: (edge3.node.media_type === 2 || edge3.node.product_type === 'clips') ? 'clips' : (edge3.node.is_video || edge3.node.video_duration ? 'feed' : null), video_duration: edge3.node.video_duration || null });
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e) { log('getChannelContents: __a=1 browser error: ' + e); }
-    }
-
-    if (!items || items.length === 0) {
-        var kgFallback = fetchFromKittygram(username);
+        const kgFallback = fetchFromKittygram(username);
         if (kgFallback && kgFallback.items && kgFallback.items.length > 0) {
             items = kgFallback.items;
-            if (kgFallback.profile && kgFallback.profile.thumbnail && (!profileThumbnail || profileThumbnail === platform.icon))
-                profileThumbnail = kgFallback.profile.thumbnail;
+            kgProfile = kgFallback.profile;
+            kgWorkingInstance = kgFallback.workingInstance;
         }
     }
 
+    const profileThumbnail = kgProfile && kgProfile.thumbnail ? kgProfile.thumbnail : platform.icon;
+
+    const videos = [];
+    const seen = {};
+
     if (items) {
-        for (var fi = 0; fi < items.length; fi++) {
-            var item = items[fi];
-            var sc = item.code || item.id;
-            if (!sc || seen[sc]) continue;
-            seen[sc] = true;
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const shortcode = item.code || item.id;
+            if (!shortcode || seen[shortcode])
+                continue;
+            seen[shortcode] = true;
 
-            var isVideo = false;
-            try { isVideo = item.isVideo || item.videoUrl || item.product_type === 'clips' || item.product_type === 'feed' || (item.video_versions && item.video_versions.length > 0) || item.video_duration; } catch {}
-            if (wantShorts && !isVideo && !isHtmlFallback) continue;
+            const isVideo = !!(item.isVideo || item.videoUrl);
+            if (wantShorts && !isVideo)
+                continue;
 
-            if (item.videoUrl) videoUrlCache[sc] = item.videoUrl;
-            else if (item.video_versions && item.video_versions.length > 0) videoUrlCache[sc] = item.video_versions[0].url;
-            feedItemCache[sc] = item;
-
-            var title = 'Instagram Post';
-            var itemCaption = null;
+            // Parse caption
+            let title = 'Instagram Post';
+            let itemCaption = null;
             try { itemCaption = item.caption && (item.caption.text || item.caption); } catch {}
-            if (itemCaption && itemCaption !== '') title = itemCaption.substring(0, 100);
+            if (itemCaption && itemCaption !== '')
+                title = itemCaption.substring(0, 100);
 
-            var itemThumb = profileThumbnail;
-            try { if (item.thumbnail && item.thumbnail !== profileThumbnail) itemThumb = item.thumbnail; } catch {}
-            try { var versions = item.image_versions2 && item.image_versions2.candidates; if (versions && versions.length > 0) itemThumb = versions[0].url || versions[0].src || itemThumb; } catch {}
-            try { if (item.display_url && (!itemThumb || itemThumb === profileThumbnail)) itemThumb = item.display_url; } catch {}
-            try { if (item.thumbnail_src && (!itemThumb || itemThumb === profileThumbnail)) itemThumb = item.thumbnail_src; } catch {}
-            try { if (item.thumbnail_resources && item.thumbnail_resources.length > 0 && (!itemThumb || itemThumb === profileThumbnail)) itemThumb = item.thumbnail_resources[0].url || item.thumbnail_resources[0].src || itemThumb; } catch {}
-            if (!itemThumb || itemThumb === platform.icon) {
-                try { var scThumb = extractPostMetadataFromHtml(response.body, sc); if (scThumb && scThumb.thumbnail) itemThumb = scThumb.thumbnail; } catch {}
-            }
-            log('getChannelContents: video ' + sc + ' thumb=' + (itemThumb ? itemThumb.substring(0, 50) + '...' : 'none'));
-            if (itemThumb && itemThumb !== platform.icon) thumbnailCache[sc] = itemThumb;
-            if (item.likes) likesCache[sc] = item.likes;
-            if (item.taken_at) datetimeCache[sc] = item.taken_at;
+            // Resolve thumbnail
+            const itemThumb = resolveItemThumbnail(item, profileThumbnail);
 
-            var duration = null;
-            try { if (item.video_duration) { duration = Math.round(item.video_duration); log('getChannelContents: video_duration=' + item.video_duration + ' -> duration=' + duration); } } catch {}
-            try { if (item.duration && !duration) { duration = Math.round(item.duration); log('getChannelContents: duration (Kittygram)=' + item.duration + ' -> duration=' + duration); } } catch {}
+            // Compute durations
+            const duration = item.duration ? Math.round(item.duration) : null;
+            const datetime = item.taken_at || null;
 
-            var datetime = null;
-            try { if (item.taken_at) datetime = item.taken_at; } catch {}
+            // Determine video URL
+            const itemVideoUrl = item.videoUrl || null;
 
-            var postUrl = API_URLS.base + (isVideo ? '/reel/' : '/p/') + sc + '/';
-            var shareUrl = getShareUrl(sc, isVideo);
-            var itemLikes = null;
-            try { if (item.likes) itemLikes = item.likes; } catch {}
+            // Populate caches (used by getContentDetails for fast cached load)
+            if (itemVideoUrl)
+                videoUrlCache[shortcode] = itemVideoUrl;
+            if (itemThumb && itemThumb !== platform.icon)
+                thumbnailCache[shortcode] = itemThumb;
+            if (item.likes)
+                likesCache[shortcode] = item.likes;
+            if (item.taken_at)
+                datetimeCache[shortcode] = item.taken_at;
+            feedItemCache[shortcode] = {
+                title: title,
+                description: itemCaption || '',
+                thumbnail: itemThumb || '',
+                authorName: username,
+                authorThumb: profileThumbnail,
+                duration: duration,
+                datetime: datetime,
+                videoUrl: itemVideoUrl
+            };
 
-            var entry = isVideo ? new PlatformVideo({
-                id: new PlatformID(platform.title, sc, config.id),
+            // Build content URL
+            const contentUrl = (settings.useInstagramUrlsForSharing && platform.regular_url || kgWorkingInstance || platform.regular_url) + (isVideo ? '/reel/' : '/p/') + shortcode + '/';
+
+            const itemLikes = item.likes || null;
+
+            const entry = isVideo ? new PlatformVideo({
+                id: new PlatformID(platform.title, shortcode, config.id),
                 name: title,
                 thumbnails: new Thumbnails([new Thumbnail(itemThumb, 0)]),
                 author: getAuthor(username, url, profileThumbnail),
                 datetime: datetime,
                 duration: duration,
                 viewCount: itemLikes,
-                url: postUrl,
-                shareUrl: shareUrl,
+                url: contentUrl,
                 isLive: false,
                 rating: itemLikes ? new RatingLikes(itemLikes) : null
             }) : new PlatformPostDetails({
-                id: new PlatformID(platform.title, sc, config.id),
+                id: new PlatformID(platform.title, shortcode, config.id),
                 name: title,
                 author: getAuthor(username, url, profileThumbnail),
                 datetime: datetime,
-                url: postUrl,
+                url: contentUrl,
                 description: itemCaption || '',
                 images: itemThumb ? [itemThumb] : [],
+                thumbnails: itemThumb ? [new Thumbnails([new Thumbnail(itemThumb, 0)])] : [],
                 textType: Type.Text.Raw,
                 content: itemCaption || '',
-                thumbnails: [],
                 rating: itemLikes ? new RatingLikes(itemLikes) : null
             });
 
+            const caption = itemCaption || '';
             if (queryLower) {
-                var searchText = (title + ' ' + (itemCaption || '')).toLowerCase();
-                if (searchText.indexOf(queryLower) === -1) continue;
+                const searchText = (entry.name + ' ' + caption).toLowerCase();
+                if (searchText.indexOf(queryLower) === -1)
+                    continue;
             }
 
             videos.push(entry);
         }
     }
 
-    log('getChannelContentPager: returning pager with ' + videos.length + ' videos');
+    if (settings && settings.sortUploads !== false)
+        videos.sort(function(a, b) { return (b.datetime || 0) - (a.datetime || 0); });
+
     return new InstagramVideoPager(videos, hasMore && !!nextCursor, { username: username, cursor: nextCursor, wantShorts: wantShorts });
 }
 
-function showToast(message) {
-    try {
-        if (typeof bridge !== 'undefined' && bridge.toast) {
-            bridge.toast(message);
-        }
-    } catch {}
-}
 
-/**
- * Builds common HTTP headers for Instagram requests
- * @returns {Object} Headers object
- */
-/**
- * Parses a raw Set-Cookie header value (single string or array) and returns
- * a cleaned Cookie: header string containing only valid (non-deleted) cookies.
- * Returns an object {cookieHeader, mid, csrftoken} for callers that need the
- * cookie header and key cookies for further use.
- * @param {string|string[]} setCookie - Raw Set-Cookie header value
- * @returns {{cookieHeader: string, valid: Object}}
- */
-function parseSetCookies(setCookie) {
-    var cookieStr = Array.isArray(setCookie) ? setCookie.join(', ') : setCookie;
-    var validCookies = {};
-    if (!cookieStr) return { cookieHeader: '', valid: validCookies };
-    // Split on commas that precede a cookie-name=value pattern (handles multi-cookie strings)
-    var cookieEntries = cookieStr.split(/,(?=\s*[A-Za-z_][A-Za-z0-9_-]*\s*=)/);
-    for (var ci = 0; ci < cookieEntries.length; ci++) {
-        var entry = cookieEntries[ci].trim();
-        if (!entry) continue;
-        var firstSemi = entry.indexOf(';');
-        var nameValue = firstSemi === -1 ? entry : entry.substring(0, firstSemi);
-        var eqIdx = nameValue.indexOf('=');
-        if (eqIdx === -1) continue;
-        var name = nameValue.substring(0, eqIdx).trim();
-        var value = nameValue.substring(eqIdx + 1).trim();
-        // Skip cookies that were marked as deleted by Instagram
-        if (value === 'deleted' || value === '""' || value === '') continue;
-        var attrs = firstSemi === -1 ? '' : entry.substring(firstSemi);
-        if (/expires\s*=\s*Thu,\s*01-Jan-1970/i.test(attrs)) continue;
-        if (/Max-Age\s*=\s*-/i.test(attrs)) continue;
-        validCookies[name] = value;
-    }
-    var cookieParts = [];
-    var keys = Object.keys(validCookies);
-    for (var ki = 0; ki < keys.length; ki++) {
-        cookieParts.push(keys[ki] + '=' + validCookies[keys[ki]]);
-    }
-    return { cookieHeader: cookieParts.join('; '), valid: validCookies };
-}
-
-function defaultHeaders() {
-    var h = {
-        'User-Agent': USER_AGENT,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer': API_URLS.base + '/',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1'
-    };
-    if (cookieStore) h['Cookie'] = cookieStore;
-    return h;
-}
-
-/**
- * Builds headers for API requests that include LSD token and app ID.
- * Modern Instagram uses LSD instead of csrftoken for logged-out GraphQL requests.
- * @param {string} lsdToken - LSD token from the page HTML
- * @param {string} mid - Mid cookie value
- * @returns {Object} Headers object for API calls
- */
-function apiHeaders(lsdToken, mid) {
-    var headers = {
-        'User-Agent': USER_AGENT,
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'x-ig-app-id': IG_APP_ID,
-        'x-fb-lsd': lsdToken || '',
-        'x-requested-with': 'XMLHttpRequest',
-        'Referer': API_URLS.base + '/',
-        'Origin': API_URLS.base
-    };
-    // Include all captured cookies
-    if (cookieStore) {
-        headers['Cookie'] = cookieStore;
-        // Extract csrftoken from cookieStore and add as x-csrftoken header (Instagram expects this)
-        var csrfMatch = cookieStore.match(/csrftoken=([^;]+)/);
-        if (csrfMatch) headers['x-csrftoken'] = csrfMatch[1];
-    } else if (mid) {
-        headers['Cookie'] = 'mid=' + mid + ';';
-    }
-    return headers;
-}
-
-/**
- * Extracts the mid (device ID) value from HTML body as fallback when Set-Cookie is missing.
- * Searches for mid in embedded JSON or JavaScript patterns.
- * @param {string} html - Page HTML
- * @returns {string|null} Mid value, or null
- */
-function extractMidFromBody(html) {
-    if (!html) return null;
-    try {
-        // Pattern: "mid":"ABC123"
-        var m1 = html.match(/["']mid["']\s*:\s*["']([a-zA-Z0-9_-]{10,})["']/);
-        if (m1 && m1[1] && m1[1] !== 'null') return m1[1];
-        // Pattern: mid: "ABC123" (JavaScript object)
-        var m2 = html.match(/mid\s*:\s*["']([a-zA-Z0-9_-]{10,})["']/);
-        if (m2 && m2[1] && m2[1] !== 'null') return m2[1];
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Extracts the LSD (Login Status Data) token from Instagram's page HTML.
- * Uses multiple regex patterns to find the token in various formats.
- * @param {string} html - Page HTML to search for the token
- * @returns {string|null} LSD token value, or null
- */
-function extractLsdToken(html) {
-    if (!html) return null;
-    try {
-        // Search for "lsd" anywhere in the page and log surrounding context
-        var lsdIdx = html.indexOf('"lsd"');
-        if (lsdIdx === -1) lsdIdx = html.indexOf("'lsd'");
-        if (lsdIdx === -1) lsdIdx = html.indexOf('LSD');
-        if (lsdIdx !== -1) {
-            var ctx = html.substring(Math.max(0, lsdIdx - 30), lsdIdx + 100);
-            log('extractLsdToken: found "lsd" at ' + lsdIdx + ' context=' + ctx.substring(0, 130));
-        } else {
-            log('extractLsdToken: "lsd" not found in HTML');
-            return null;
-        }
-
-        // Diagnostic: check for canonical ["LSD" array format presence
-        var lsdArrIdx = html.indexOf('["LSD"');
-        if (lsdArrIdx !== -1) {
-            var arrCtx = html.substring(lsdArrIdx, lsdArrIdx + 150);
-            log('extractLsdToken: found ["LSD"] array at ' + lsdArrIdx + ' context=' + arrCtx.substring(0, 130));
-        }
-
-        // Pattern A (NEW, canonical Meta format): ["LSD",[deps],{"token":"VALUE"},###]
-        // This is the modern Polaris/Comet bundle format and is the most reliable.
-        var mA = html.match(/\["LSD"\s*,\s*\[[^\]]*\]\s*,\s*\{[^}]*?["']token["']\s*:\s*["']([^"']+)/);
-        if (mA && mA[1] && mA[1] !== 'null') {
-            log('extractLsdToken: matched pattern A (canonical Meta array)');
-            return mA[1];
-        }
-
-        // Pattern 1: {"lsd":{"token":"ABC123"}}
-        var m1 = html.match(/["']lsd["']\s*:\s*\{[^}]*?["']token["']\s*:\s*["']([^"']+)/i);
-        if (m1 && m1[1] !== 'null') { log('extractLsdToken: matched pattern 1'); return m1[1]; }
-
-        // Pattern 2: "LSD":["ABC123"]
-        var m2 = html.match(/["']LSD["']\s*:\s*\[["']([^"']+)/);
-        if (m2 && m2[1] !== 'null') { log('extractLsdToken: matched pattern 2'); return m2[1]; }
-
-        // Pattern 3: LSD.token = "ABC123"
-        var m3 = html.match(/LSD\s*\.\s*token\s*=\s*["']([^"']+)/);
-        if (m3 && m3[1] !== 'null') { log('extractLsdToken: matched pattern 3'); return m3[1]; }
-
-        // Pattern 4: __d("LSD",[],function(n){return "ABC123"})
-        var m4 = html.match(/__d\s*\(\s*["']LSD["'][\s\S]*?return\s+["']([^"']+)/);
-        if (m4 && m4[1] !== 'null') { log('extractLsdToken: matched pattern 4'); return m4[1]; }
-
-        // Pattern 5: LSD={"token":"ABC123"}
-        var m5 = html.match(/LSD\s*=\s*["']?\{[^}]*?["']token["']\s*:\s*["']([^"']+)/);
-        if (m5 && m5[1] !== 'null') { log('extractLsdToken: matched pattern 5'); return m5[1]; }
-
-        // Pattern 6: "lsd":"ABC123" — iterate through ALL occurrences with global flag,
-        // because the FIRST `"lsd"` in the HTML may be `"lsd":null` (login form config).
-        // No /i flag: uppercase "LSD" was a different format we already handled in patterns 2/A.
-        var m6Regex = /["']lsd["']\s*:\s*["']([^"'},\s]+)["']/g;
-        var m6;
-        while ((m6 = m6Regex.exec(html)) !== null) {
-            if (m6[1] && m6[1].length > 0 && m6[1] !== 'null') {
-                log('extractLsdToken: matched pattern 6 at offset ' + m6.index);
-                return m6[1];
-            }
-        }
-
-        // Pattern 7: Windowed search around the first lowercase "lsd" occurrence
-        if (lsdIdx !== -1) {
-            var windowStr = html.substring(lsdIdx, lsdIdx + 200);
-            var wMatch = windowStr.match(/["']lsd["']\s*:\s*["']([^"'},\s]+)/);
-            if (wMatch && wMatch[1].length > 0 && wMatch[1] !== 'null') {
-                log('extractLsdToken: matched pattern 7 (windowed)');
-                return wMatch[1];
-            }
-        }
-
-        // Pattern 8: "\"lsd\":\"ABC123\"" (escaped quotes inside JavaScript strings)
-        var m8 = html.match(/\\"lsd\\"\s*:\s*\\"([^"\\]+)/);
-        if (m8 && m8[1].length > 0 && m8[1] !== 'null') {
-            log('extractLsdToken: matched pattern 8 (escaped)');
-            return m8[1];
-        }
-
-        log('extractLsdToken: no patterns matched');
-        return null;
-    } catch (e) {
-        log('extractLsdToken: error: ' + e);
-        return null;
-    }
-}
-
-/**
- * Generates a random mid (device ID) value for requests when server doesn't provide one.
- * Uses an 'ags' prefix pattern matching real Instagram mids.
- * @returns {string} Random mid string
- */
-function generateMid() {
-    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-    var result = 'ags';
-    for (var i = 0; i < 14; i++) {
-        result += chars.charAt(Math.floor(Math.random() * 64));
-    }
-    return result;
-}
-
-/**
- * Fetches the mid cookie and LSD token from Instagram's homepage.
- * If LSD is not found on the homepage, tries a profile page that is known to contain it.
- * The mid cookie identifies the device/session; the LSD token is used for CSRF.
- * Caches results in global variables for reuse across requests.
- * @returns {{lsd: string|null, mid: string|null}} Session tokens
- */
-function getSession() {
-    if (lsdToken && midCookie) {
-        log('getSession: using cached session');
-        return { lsd: lsdToken, mid: midCookie };
-    }
-
-    try {
-        log('getSession: fetching homepage');
-        var cacheBuster = '?_=' + new Date().getTime();
-        var resp = http.GET(API_URLS.base + cacheBuster, defaultHeaders(), false);
-
-        // Extract ALL cookies from Set-Cookie headers, filtering out deleted/expired ones
-        if (resp && resp.headers) {
-            var setCookie = resp.headers['Set-Cookie'] || resp.headers['set-cookie'] || resp.headers['Set-cookie'];
-            if (setCookie) {
-                var parsed = parseSetCookies(setCookie);
-                if (parsed.cookieHeader) cookieStore = parsed.cookieHeader;
-                if (parsed.valid.mid) {
-                    midCookie = parsed.valid.mid;
-                    log('getSession: found mid=' + midCookie.substring(0, 10) + '...');
-                }
-                log('getSession: captured ' + Object.keys(parsed.valid).length + ' valid cookies: ' + cookieStore.substring(0, 200));
-            }
-        }
-
-        // Search for LSD token in the homepage body
-        if (resp && resp.body) {
-            lsdToken = extractLsdToken(resp.body);
-            if (lsdToken) log('getSession: found lsd on homepage=' + lsdToken.substring(0, 10) + '...');
-        }
-
-        // If LSD not found on homepage, try fetching from a profile page
-        if (!lsdToken) {
-            log('getSession: homepage has no LSD, fetching a profile page');
-            try {
-                var profileResp = http.GET(API_URLS.base + '/instagram/', defaultHeaders(), false);
-                if (profileResp && profileResp.isOk && profileResp.body) {
-                    lsdToken = extractLsdToken(profileResp.body);
-                    if (lsdToken) log('getSession: found lsd on /instagram/ page=' + lsdToken.substring(0, 10) + '...');
-                }
-            } catch (e2) {
-                log('getSession: profile page error: ' + e2);
-            }
-        }
-
-        // Generate random mid if server didn't provide one
-        if (!midCookie) {
-            midCookie = generateMid();
-            log('getSession: generated mid=' + midCookie.substring(0, 10) + '...');
-        }
-
-        if (lsdToken) {
-            log('getSession: session established');
-            return { lsd: lsdToken, mid: midCookie };
-        }
-
-        log('getSession: incomplete - lsd=' + (!!lsdToken) + ' mid=' + (!!midCookie));
-        return { lsd: lsdToken, mid: midCookie };
-    } catch (e) {
-        log('getSession: error: ' + e);
-        return { lsd: null, mid: null };
-    }
-}
-
-/**
- * Builds alternative headers for API requests using a fallback app ID.
- * Used when the primary IG_APP_ID returns 401.
- * @param {string} lsdToken - LSD token from the page HTML
- * @param {string} mid - Mid cookie value
- * @returns {Object} Headers object for API calls
- */
-function apiHeadersAlt(lsdToken, mid) {
-    var headers = {
-        'User-Agent': USER_AGENT,
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'x-ig-app-id': IG_APP_ID_ALT,
-        'x-fb-lsd': lsdToken || '',
-        'x-requested-with': 'XMLHttpRequest',
-        'Referer': API_URLS.base + '/',
-        'Origin': API_URLS.base
-    };
-    if (cookieStore) {
-        headers['Cookie'] = cookieStore;
-        var csrfMatch = cookieStore.match(/csrftoken=([^;]+)/);
-        if (csrfMatch) headers['x-csrftoken'] = csrfMatch[1];
-    } else if (mid) {
-        headers['Cookie'] = 'mid=' + mid + ';';
-    }
-    return headers;
-}
-
-/**
- * Fetches user profile info via Instagram's web API (web_profile_info endpoint).
- * Tries both app IDs and falls back to POST if GET fails with 401.
- * Clears stale session and caches on 401 (rate limited).
- * @param {string} username - Instagram username
- * @param {Object} session - Session object with lsd and mid
- * @returns {Object|null} Parsed JSON response, or null
- */
-function fetchWebProfile(username, session) {
-    var url = API_URLS.base + '/api/v1/users/web_profile_info/?username=' + encodeURIComponent(username);
-    log('fetchWebProfile: url=' + url);
-    var appIdsToTry = [IG_APP_ID, IG_APP_ID_ALT];
-    for (var ai = 0; ai < appIdsToTry.length; ai++) {
-        var headers = (appIdsToTry[ai] === IG_APP_ID)
-            ? apiHeaders(session.lsd, session.mid)
-            : apiHeadersAlt(session.lsd, session.mid);
-        try {
-            log('fetchWebProfile: trying GET with appId=' + appIdsToTry[ai].substring(0, 6) + '...');
-            var resp = http.GET(url, headers, false);
-            if (resp && resp.body) {
-                log('fetchWebProfile: GET code=' + resp.code + ' length=' + resp.body.length);
-                if (resp.code === 401) {
-                    log('fetchWebProfile: 401, will try next app ID');
-                    continue;
-                }
-                if (resp.isOk) {
-                    var parsed = tryParse(resp.body);
-                    if (parsed) {
-                        log('fetchWebProfile: keys=' + Object.keys(parsed).join(', '));
-                        if (parsed.data && parsed.data.user) {
-                            log('fetchWebProfile: user keys=' + Object.keys(parsed.data.user).join(', '));
-                        }
-                        return parsed;
-                    }
-                }
-                if (resp.body) log('fetchWebProfile: GET first 200=' + resp.body.substring(0, 200));
-            }
-        } catch (e) {
-            log('fetchWebProfile: GET error with appId=' + appIdsToTry[ai].substring(0, 6) + '...: ' + e);
-        }
-    }
-
-    // NOTE: Don't clear session on 401 — web_profile_info requires login sessionid cookie
-    // in 2024+. The LSD token may still be valid for other endpoints (HTML fetch, etc.).
-    // Clearing here just wastes time on a re-auth cycle.
-
-    // Try POST request with primary app ID
-    try {
-        var postHeaders = apiHeaders(session.lsd, session.mid);
-        postHeaders['Referer'] = API_URLS.base + '/' + encodeURIComponent(username) + '/';
-        postHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
-        log('fetchWebProfile: trying POST');
-        var resp = http.POST(url, '', postHeaders, false);
-        if (resp && resp.body) {
-            log('fetchWebProfile: POST code=' + resp.code + ' length=' + resp.body.length);
-            if (resp.isOk) {
-                var parsed = tryParse(resp.body);
-                if (parsed) return parsed;
-            }
-        }
-    } catch (e) {
-        log('fetchWebProfile: POST error: ' + e);
-    }
-
-    log('fetchWebProfile: failed');
-    return null;
-}
 
 /**
  * Fetches a user's timeline from Kittygram instances.
@@ -1403,258 +766,284 @@ function fetchWebProfile(username, session) {
  * @returns {Object|null} Parsed result with items and pagination info
  */
 function fetchFromKittygram(username, afterCursor) {
-    var kgHeaders = {
-        'User-Agent': USER_AGENT,
-        'Sec-Fetch-Mode': 'navigate'
-    };
-    var instances = getKittygramInstances();
+    const instances = getKittygramInstances();
 
-    var result = null;
-    var failedInstance = null;
+    let result = null;
+    let workingInstance = null;
+    let switched = false;
     instances.some(function(instance) {
         try {
-            var url = instance + '/' + encodeURIComponent(username) + '/';
-            if (afterCursor) {
-                url += '?after=' + encodeURIComponent(afterCursor);
-            }
-            log('fetchFromKittygram: trying ' + url);
-            var resp = http.GET(url, kgHeaders, false);
+            let url = instance + '/' + encodeURIComponent(username) + '/';
+            if (afterCursor)
+               url += '?after=' + encodeURIComponent(afterCursor);
+
+            const resp = httpGET(url);
             if (resp && resp.isOk && resp.body) {
-                log('fetchFromKittygram: ' + instance + ' got ' + resp.body.length + ' bytes');
-                var parsed = parseKittygramHtmlWithPagination(resp.body, username);
+                const parsed = parseKittygramHtmlWithPagination(resp.body, username);
                 if (parsed.items && parsed.items.length > 0) {
-                    log('fetchFromKittygram: found ' + parsed.items.length + ' items from ' + instance + ', hasMore=' + parsed.hasMore);
                     result = parsed;
+                    workingInstance = instance;
                     return true;
                 }
             } else if (resp) {
-                log('fetchFromKittygram: ' + instance + ' code=' + resp.code);
-                failedInstance = instance;
-                showToast('Request failed, switching instance');
+                switched = true;
+                bridge.toast('Request failed, switching instance');
             }
-        } catch (e) {
-            log('fetchFromKittygram: ' + instance + ' error: ' + e);
-            failedInstance = instance;
-            showToast('Request failed, switching instance');
+        } catch {
+            switched = true;
+            bridge.toast('Request failed, switching instance');
         }
         return false;
     });
 
-    if (result) return result;
-    log('fetchFromKittygram: all instances failed');
-    return null;
+    if (switched && workingInstance)
+       bridge.toast('Switched to: ' + workingInstance);
+
+    if (result)
+        result.workingInstance = workingInstance;
+    return result;
 }
 
 /**
  * Decodes a Kittygram /mediaproxy?url=<encoded> src attribute into a real CDN URL.
- * Kittygram percent-encodes the CDN URL and uses lowercase hex, so we need decodeURIComponent.
  * @param {string} proxySrc - e.g. "/mediaproxy?url=https%3a%2f%2fscontent..."
  * @returns {string|null} The decoded CDN URL, or null
  */
 function decodeKittygramProxy(proxySrc) {
-    if (!proxySrc) return null;
+    if (!proxySrc)
+       return null;
     try {
-        var m = proxySrc.match(/\/mediaproxy\?url=(.+)/);
-        if (m) return decodeURIComponent(m[1]);
+        const match = proxySrc.match(/\/mediaproxy\?url=(.+)/);
+        return match ? decodeURIComponent(match[1]) : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Extracts the best available thumbnail from a Kittygram document (post page or card).
+ * Checks video[poster] first, falls back to img[src], filtering "nil" placeholders.
+ * @param {Document} doc - Parsed Kittygram HTML document
+ * @returns {string|null} Decoded thumbnail URL, or null
+ */
+function extractThumbnail(doc) {
+    const postImageDiv = doc.querySelector('.post-image');
+    if (!postImageDiv) return null;
+    const videoEl = postImageDiv.querySelector('video');
+    if (videoEl) {
+        const poster = videoEl.getAttribute('poster');
+        if (poster && poster !== 'nil') return decodeKittygramProxy(poster);
+    }
+    const imgEl = postImageDiv.querySelector('img');
+    if (imgEl) {
+        const src = imgEl.getAttribute('src');
+        if (src && src !== 'nil') return decodeKittygramProxy(src);
+    }
+    return null;
+}
+
+/**
+ * Extracts the like count from a Kittygram document.
+ * @param {Document} doc - Parsed Kittygram HTML document
+ * @returns {number|null} Like count, or null
+ */
+function extractLikes(doc) {
+    const likesEl = doc.querySelector('.post-likes');
+    if (!likesEl)
+       return null;
+    const likesText = likesEl.textContent || '';
+    if (likesText.toLowerCase().indexOf('nil') !== -1)
+       return null;
+    const likesMatch = likesText.match(/([\d,]+)/);
+    if (!likesMatch)
+       return null;
+    const num = parseInt(likesMatch[1].replace(/,/g, ''), 10);
+    return isNaN(num) ? null : num;
+}
+
+/**
+ * Converts a "YYYY-MM-DD HH:MM:SS" datetime string to a Unix timestamp via Date.UTC.
+ * @param {string} str - Datetime string
+ * @returns {number|null} Unix timestamp in seconds, or null if unparseable
+ */
+function parseDatetimeToUnix(str) {
+    if (!str || typeof str !== 'string')
+       return null;
+    const m = str.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+    if (!m)
+       return null;
+    return Math.floor(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000);
+}
+
+/**
+ * Extracts profile info from a Kittygram HTML page DOM.
+ * @param {string} html - Kittygram profile page HTML
+ * @returns {Object|null} { name, thumbnail, bio, followers } or null
+ */
+function parseKittygramProfile(html) {
+    // Extract profile info from Kittygram HTML DOM
+    try {
+        const doc = domParser.parseFromString(html, 'text/html');
+        const profPicDiv = doc.querySelector('.profile-picture');
+        let thumb = null;
+        if (profPicDiv) {
+            const img = profPicDiv.querySelector('img');
+            if (img) {
+                const src = img.getAttribute('src');
+                if (src)
+                   thumb = decodeKittygramProxy(src);
+            }
+        }
+        const nameDiv = doc.querySelector('.usernames');
+        let name = null;
+        if (nameDiv) {
+            const h3 = nameDiv.querySelector('h3');
+            if (h3)
+               name = h3.textContent.trim();
+        }
+        const bioDiv = doc.querySelector('.user-bio-text');
+        const bio = bioDiv ? bioDiv.textContent.trim() : null;
+        let followers = null;
+        const statNumbers = doc.querySelectorAll('.stat-number');
+        if (statNumbers.length > 0) {
+            const fNum = parseInt(statNumbers[0].textContent.replace(/,/g, ''), 10);
+            if (!isNaN(fNum))
+               followers = fNum;
+        }
+        if (name || thumb)
+           return { name: name, thumbnail: thumb, bio: bio, followers: followers };
+    } catch (e) {
+        log('parseKittygramProfile: error: ' + e);
+    }
+    return null;
+}
+
+/**
+ * Extracts duration from a decoded Kittygram video URL.
+ * Tries JSON, EFG parameter, and base64 EFG formats.
+ * @param {string} url - Decoded video URL
+ * @returns {number|null} Duration in seconds, or null
+ */
+function extractDurationFromUrl(url) {
+    if (!url)
+       return null;
+    let match = url.match(/"duration_s"\s*:\s*(\d+)/);
+    if (match)
+       return parseInt(match[1], 10);
+    const efgMatch = url.match(/efg=([^&]+)/);
+    if (!efgMatch)
+       return null;
+    try {
+        const decoded = decodeURIComponent(efgMatch[1]);
+        match = decoded.match(/"duration_s"\s*:\s*(\d+)/);
+        if (match)
+           return parseInt(match[1], 10);
+        let base64 = decoded.replace(/-/g, '+').replace(/_/g, '/');
+        while (base64.length % 4) base64 += '=';
+        match = atob(base64).match(/"duration_s"\s*:\s*(\d+)/);
+        if (match)
+           return parseInt(match[1], 10);
     } catch {}
     return null;
 }
 
 /**
- * Parses a Kittygram profile/timeline HTML page using regex only (no DOM).
+ * Parses a single Kittygram card HTML fragment into a post item.
+ * @param {string} card - HTML fragment for a single post card
+ * @returns {Object|null} { code, videoUrl, thumbnail, caption, taken_at, isVideo, likes, comments, duration } or null
+ */
+function parseKittygramCard(card) {
+    const scMatch = card.match(/href="\/p\/([A-Za-z0-9_-]{5,})"/);
+    if (!scMatch)
+       return null;
+    const shortcode = scMatch[1];
+
+    let videoUrl = null;
+    let isVideo = false;
+    let duration = null;
+    const sourceMatch = card.match(/<source\s[^>]*src="(\/mediaproxy\?url=[^"]+)"/);
+    if (sourceMatch) {
+        isVideo = true;
+        videoUrl = decodeKittygramProxy(sourceMatch[1]);
+        const cardDuration = extractDurationFromUrl(videoUrl);
+        if (cardDuration)
+           duration = cardDuration;
+    }
+
+    const cardDoc = domParser.parseFromString(card, 'text/html');
+    const thumbnail = extractThumbnail(cardDoc);
+
+    const captionMatch = card.match(/class="post-caption-text"[^>]*>([\s\S]*?)<\/p>/);
+    let caption = null;
+    if (captionMatch) {
+        caption = captionMatch[1]
+            .replace(/&#039;/g, "'").replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/<[^>]+>/g, '').trim();
+    }
+
+    let takenAt = null;
+    const timeMatch = card.match(/Posted at:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+    if (timeMatch)
+       takenAt = parseDatetimeToUnix(timeMatch[1]);
+    if (!takenAt) {
+        const timeEl = cardDoc.querySelector('time');
+        if (timeEl) {
+            const dt = timeEl.getAttribute('datetime');
+            if (dt)
+               takenAt = parseDatetimeToUnix(dt);
+        }
+    }
+
+    const likes = extractLikes(cardDoc);
+
+    const commentsRegex = new RegExp('href="/p/' + shortcode + '"[^>]*>(\\d+)\\s+Comments?</a>');
+    const commentsMatch = card.match(commentsRegex);
+    let comments = null;
+    if (commentsMatch) {
+        const commentsNum = parseInt(commentsMatch[1], 10);
+        if (!isNaN(commentsNum))
+           comments = commentsNum;
+    }
+
+    return {
+        code: shortcode,
+        videoUrl: videoUrl,
+        thumbnail: thumbnail,
+        caption: caption ? { text: caption } : null,
+        taken_at: takenAt,
+        isVideo: isVideo,
+        likes: likes,
+        comments: comments,
+        duration: duration
+    };
+}
+
+/**
+ * Parses a Kittygram profile/timeline HTML page using regex and DOM.
  * Returns { items, profile } where each item has:
- *   code, videoUrl, thumbnail, caption, taken_at (unix seconds), isVideo
+ *   code, videoUrl, thumbnail, caption, taken_at, isVideo, likes, comments, duration
  * and profile has: name, thumbnail, followers, bio
  */
 function parseKittygramHtml(html, username) {
-    var items = [];
-    var seen = {};
-    var profile = null;
-
-    // ── Profile info: use domParser ───────────────────────────────────────
-    try {
-        var profDoc = domParser.parseFromString(html, 'text/html');
-        
-        // Profile picture: first <img> inside class="profile-picture"
-        var profPicDiv = profDoc.querySelector('.profile-picture');
-        var profThumb = null;
-        if (profPicDiv) {
-            var imgEl = profPicDiv.querySelector('img');
-            if (imgEl) {
-                var srcAttr = imgEl.getAttribute('src');
-                if (srcAttr) profThumb = decodeKittygramProxy(srcAttr);
-            }
-        }
-
-        // Display name: text inside <h3> inside class="usernames"
-        var nameDiv = profDoc.querySelector('.usernames');
-        var profName = null;
-        if (nameDiv) {
-            var h3El = nameDiv.querySelector('h3');
-            if (h3El) profName = h3El.textContent.trim();
-        }
-
-        // Bio: text inside class="user-bio-text"
-        var bioDiv = profDoc.querySelector('.user-bio-text');
-        var profBio = null;
-        if (bioDiv) {
-            profBio = bioDiv.textContent.replace(/<[^>]+>/g, '').trim();
-        }
-
-        // Followers: first <b class="stat-number"> content
-        var profFollowers = null;
-        var statNumbers = profDoc.querySelectorAll('.stat-number');
-        if (statNumbers.length > 0) {
-            var follText = statNumbers[0].textContent;
-            var fNum = parseInt(follText.replace(/,/g, ''), 10);
-            if (!isNaN(fNum)) profFollowers = fNum;
-        }
-
-        if (profName || profThumb) {
-            profile = { name: profName, thumbnail: profThumb, bio: profBio, followers: profFollowers };
-            log('parseKittygramHtml: profile name=' + profName + ' followers=' + profFollowers);
-        }
-    } catch (e) {
-        log('parseKittygramHtml: profile parse error: ' + e);
-    }
-
-    // ── Posts: split by <div class="item-card post"> ─────────────────────
-    // Split on card boundaries so we can associate data within each card
-    var cardSplitRegex = /<div class="item-card post">/g;
-    var cardStarts = [];
-    var m;
-    while ((m = cardSplitRegex.exec(html)) !== null) cardStarts.push(m.index);
-
-    for (var ci = 0; ci < cardStarts.length; ci++) {
-        var cardStart = cardStarts[ci];
-        var cardEnd = ci + 1 < cardStarts.length ? cardStarts[ci + 1] : html.length;
-        var card = html.substring(cardStart, cardEnd);
-
-        try {
-            // Shortcode: <a href="/p/CODE"> (comments link at bottom of card)
-            var scMatch = card.match(/href="\/p\/([A-Za-z0-9_-]{5,})"/);
-            if (!scMatch) continue;
-            var shortcode = scMatch[1];
-            if (seen[shortcode]) continue;
-            seen[shortcode] = true;
-
-            // Video source URL: <source src="/mediaproxy?url=...">
-            var videoUrl = null;
-            var thumbnail = null;
-            var isVideo = false;
-            var duration = null;
-            var sourceMatch = card.match(/<source\s[^>]*src="(\/mediaproxy\?url=[^"]+)"/);
-            if (sourceMatch) {
-                isVideo = true;
-                var decodedUrl = decodeKittygramProxy(sourceMatch[1]);
-                videoUrl = decodedUrl;
-                var durationMatch = decodedUrl.match(/"duration_s"\s*:\s*(\d+)/);
-                if (!durationMatch) {
-                    var efgMatch = decodedUrl.match(/efg=([^&]+)/);
-                    if (efgMatch) {
-                        try {
-                            var efgUrlDecoded = decodeURIComponent(efgMatch[1]);
-                            var efgJsonMatch = efgUrlDecoded.match(/"duration_s"\s*:\s*(\d+)/);
-                            if (!efgJsonMatch) {
-                                try {
-                                    var efgBase64 = efgUrlDecoded.replace(/-/g, '+').replace(/_/g, '/');
-                                    while (efgBase64.length % 4) efgBase64 += '=';
-                                    var efgBinary = atob(efgBase64);
-                                    var efgJsonMatch2 = efgBinary.match(/"duration_s"\s*:\s*(\d+)/);
-                                    if (efgJsonMatch2) efgJsonMatch = efgJsonMatch2;
-                                } catch {}
-                            }
-                            if (efgJsonMatch) durationMatch = efgJsonMatch;
-                        } catch {}
-                    }
-                }
-                if (durationMatch) {
-                    duration = parseInt(durationMatch[1], 10);
-                    log('parseKittygramHtml: extracted duration=' + duration + ' for ' + shortcode);
-                }
-            }
-
-            // Thumbnail: only look inside .post-image to avoid picking up profile pics
-            var cardDoc = domParser.parseFromString(card, 'text/html');
-            var postImageDiv = cardDoc.querySelector('.post-image');
-            if (postImageDiv) {
-                var videoEl = postImageDiv.querySelector('video');
-                if (videoEl) {
-                    var posterAttr = videoEl.getAttribute('poster');
-                    if (posterAttr && posterAttr !== 'nil') thumbnail = decodeKittygramProxy(posterAttr);
-                }
-                if (!thumbnail) {
-                    var imgEl = postImageDiv.querySelector('img');
-                    if (imgEl) {
-                        var srcAttr = imgEl.getAttribute('src');
-                        if (srcAttr && srcAttr !== 'nil') thumbnail = decodeKittygramProxy(srcAttr);
-                    }
-                }
-            }
-
-            // Caption: text inside class="post-caption-text"
-            var captionMatch = card.match(/class="post-caption-text"[^>]*>([\s\S]*?)<\/p>/);
-            var caption = captionMatch ? captionMatch[1].replace(/&#039;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/<[^>]+>/g, '').trim() : null;
-
-            // Timestamp: use "Posted at:" text (more reliable than <time> element)
-            var taken_at = null;
-            var timeMatch = card.match(/Posted at:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
-            if (timeMatch) {
-                taken_at = parseDatetimeToUnix(timeMatch[1]);
-                log('parseKittygramHtml: taken_at from Posted at text=' + taken_at + ' for ' + shortcode);
-            }
-            if (!taken_at) {
-                var timeEl = cardDoc.querySelector('time');
-                if (timeEl) {
-                    var dtAttr = timeEl.getAttribute('datetime');
-                    if (dtAttr) taken_at = parseDatetimeToUnix(dtAttr);
-                }
-            }
-
-            // Likes: use domParser on .post-likes, handle "nil likes"
-            var likes = null;
-            try {
-                var likesEl = cardDoc.querySelector('.post-likes');
-                if (likesEl) {
-                    var likesText = likesEl.textContent || '';
-                    if (likesText.toLowerCase().indexOf('nil') === -1) {
-                        var likesMatch = likesText.match(/([\d,]+)/);
-                        if (likesMatch) {
-                            var likesNum = parseInt(likesMatch[1].replace(/,/g, ''), 10);
-                            if (!isNaN(likesNum)) likes = likesNum;
-                        }
-                    }
-                }
-            } catch (e) {
-                log('parseKittygramHtml: likes parse error: ' + e);
-            }
-
-            // Comments: <a href="/p/CODE"> 257 Comments</a>
-            var commentsMatch = card.match(/href="\/p\/' + shortcode + '"[^>]*>(\d+)\s+Comments<\/a>/);
-            var commentsMatchAlt = card.match(/href="\/p\/' + shortcode + '">\s*(\d+)\s+Comments/);
-            var comments = null;
-            if (commentsMatch || commentsMatchAlt) {
-                var cm = commentsMatch || commentsMatchAlt;
-                var commentsNum = parseInt(cm[1], 10);
-                if (!isNaN(commentsNum)) comments = commentsNum;
-            }
-
-            items.push({
-                code: shortcode,
-                videoUrl: videoUrl,
-                thumbnail: thumbnail,
-                caption: caption ? { text: caption } : null,
-                taken_at: taken_at,
-                isVideo: isVideo,
-                likes: likes,
-                comments: comments,
-                duration: duration
-            });
-        } catch (e) {
-            log('parseKittygramHtml: card parse error: ' + e);
+    // Split Kittygram HTML into post cards and parse each one
+    const profile = parseKittygramProfile(html);
+    const items = [];
+    const seen = {};
+    const cardRegex = /<div class="item-card post">/g;
+    let match;
+    while ((match = cardRegex.exec(html)) !== null) {
+        const cardStart = match.index;
+        const remaining = html.substring(cardStart + match[0].length);
+        const nextCardMatch = remaining.match(/<div class="item-card post">/);
+        const cardEnd = nextCardMatch ? html.indexOf('<div class="item-card post">', cardStart + match[0].length) : html.length;
+        const card = cardEnd === html.length ? remaining : html.substring(cardStart, cardEnd);
+        const item = parseKittygramCard(card);
+        if (item && !seen[item.code]) {
+            seen[item.code] = true;
+            items.push(item);
         }
     }
-
     return { items: items, profile: profile };
 }
 
@@ -1663,1838 +1052,206 @@ function parseKittygramHtml(html, username) {
  * Returns { items, profile, nextCursor, hasMore }.
  */
 function parseKittygramHtmlWithPagination(html, username) {
-    var result = parseKittygramHtml(html, username);
-    var nextCursor = null;
-    var hasMore = false;
+    // Parse Kittygram HTML with pagination cursor extraction
+    const result = parseKittygramHtml(html, username);
+    let nextCursor = null;
+    let hasMore = false;
 
     try {
-        var nextPageMatch = html.match(/href="(\?after=[^"]+)"\s+class="next-button"/);
-        if (nextPageMatch && nextPageMatch[1]) {
-            var afterParam = nextPageMatch[1].replace('?after=', '');
-            nextCursor = afterParam;
-            hasMore = nextCursor && nextCursor.length > 0;
-            log('parseKittygramHtmlWithPagination: found nextCursor=' + nextCursor.substring(0, 30) + '...');
+        const match = html.match(/href="(\?after=[^"]+)"\s+class="next-button"/);
+        if (match && match[1]) {
+            nextCursor = match[1].replace('?after=', '');
+            hasMore = nextCursor.length > 0;
         }
-    } catch (e) {
-        log('parseKittygramHtmlWithPagination: error extracting pagination: ' + e);
-    }
+    } catch {}
 
-    return {
-        items: result.items,
-        profile: result.profile,
-        nextCursor: nextCursor,
-        hasMore: hasMore
-    };
+    return { items: result.items, profile: result.profile, nextCursor: nextCursor, hasMore: hasMore };
 }
 
-/**
- * Fetches a single post page from a Kittygram instance and returns the video URL and thumbnail.
- * Used as a fallback in fetchVideoUrl when Instagram's own API fails.
- * @param {string} shortcode
- * @returns {{ videoUrl: string|null, thumbnail: string|null }}
- */
 /**
  * Fetches a post page from Kittygram and returns video URL, thumbnail, and metadata.
  * @param {string} shortcode - Post shortcode
  * @returns {{ videoUrl: string|null, thumbnail: string|null, caption: string|null, author: string|null, datetime: number|null }}
  */
 function fetchKittygramPostData(shortcode) {
-    var kgHeaders = {
-        'User-Agent': USER_AGENT,
-        'Sec-Fetch-Mode': 'navigate'
-    };
-    var instances = getKittygramInstances();
-    var result = null;
+    // Fetch a single post from Kittygram instances and extract all fields
+    const instances = getKittygramInstances();
+    let result = null;
+
     instances.some(function(instance) {
         try {
-            var url = instance + '/p/' + shortcode;
-            log('fetchKittygramPostData: trying ' + url);
-            var resp = http.GET(url, kgHeaders, false);
+            const url = instance + '/p/' + shortcode;
+            const resp = httpGET(url);
             if (resp && resp.isOk && resp.body) {
-                var body = resp.body;
-                var videoUrl = null;
-                var thumbnail = null;
-                var caption = null;
-                var author = null;
-                var datetime = null;
-                var duration = null;
+                const body = resp.body;
 
-                // Video source: <source src="/mediaproxy?url=...">
-                var sourceMatch = body.match(/<source\s[^>]*src="(\/mediaproxy\?url=[^"]+)"/);
+                let videoUrl = null;
+                let thumbnail = null;
+                let caption = null;
+                let author = null;
+                let datetime = null;
+                let duration = null;
+                let videoWidth = null;
+                let videoHeight = null;
+                let videoCodec = null;
+                let images = [];
+
+                const sourceMatch = body.match(/<source\s[^>]*src="(\/mediaproxy\?url=[^"]+)"/);
                 if (sourceMatch) {
-                    var decodedUrl = decodeKittygramProxy(sourceMatch[1]);
-                    videoUrl = decodedUrl;
-                    log('fetchKittygramPostData: decodedUrl=' + decodedUrl.substring(0, 100) + '...');
-                    // Try direct duration_s match first
-                    var durationMatch = decodedUrl.match(/"duration_s"\s*:\s*(\d+)/);
-                    if (!durationMatch) {
-                        // Try to extract from efg param which is base64 encoded JSON
-                        var efgMatch = decodedUrl.match(/efg=([^&]+)/);
-                        log('fetchKittygramPostData: efgMatch=' + (efgMatch ? 'found' : 'null'));
-                        if (efgMatch) {
-                            try {
-                                // efg is URL-encoded base64, need to URL decode then base64 decode
-                                var efgUrlDecoded = decodeURIComponent(efgMatch[1]);
-                                log('fetchKittygramPostData: efgUrlDecoded length=' + efgUrlDecoded.length);
-                                // Try to parse as JSON directly (it's base64 encoded but might be URL-safe)
-                                var efgJsonMatch = efgUrlDecoded.match(/"duration_s"\s*:\s*(\d+)/);
-                                if (!efgJsonMatch) {
-                                    // Try base64 decode
-                                    try {
-                                        var efgBase64 = efgUrlDecoded.replace(/-/g, '+').replace(/_/g, '/');
-                                        while (efgBase64.length % 4) efgBase64 += '=';
-                                        var efgBinary = atob(efgBase64);
-                                        var efgJsonMatch2 = efgBinary.match(/"duration_s"\s*:\s*(\d+)/);
-                                        if (efgJsonMatch2) efgJsonMatch = efgJsonMatch2;
-                                    } catch {}
-                                }
-                                if (efgJsonMatch) durationMatch = efgJsonMatch;
-                            } catch (e) {
-                                log('fetchKittygramPostData: efg parse error: ' + e);
-                            }
-                        }
-                    }
-                    log('fetchKittygramPostData: durationMatch=' + (durationMatch ? durationMatch[1] : 'null'));
-                    if (durationMatch) {
-                        duration = parseInt(durationMatch[1], 10);
+                    videoUrl = decodeKittygramProxy(sourceMatch[1]);
+                    duration = extractDurationFromUrl(videoUrl);
+                    // Extract codec from source type attribute (e.g., 'video/mp4; codecs=avc1.64001F')
+                    const typeMatch = body.match(/<source[^>]*type="([^"]+)"/);
+                    if (typeMatch) {
+                        const codecMatch = typeMatch[1].match(/codecs=["']?([^"'\s;]+)/);
+                        if (codecMatch) videoCodec = codecMatch[1];
                     }
                 }
 
-                // Thumbnail - only look inside .post-image to avoid picking up the user's profile pic
-                var bodyDoc = domParser.parseFromString(body, 'text/html');
-                var postImageDiv = bodyDoc.querySelector('.post-image');
+                const bodyDoc = domParser.parseFromString(body, 'text/html');
+                thumbnail = extractThumbnail(bodyDoc);
+
+                // Extract video dimensions from the video element (separate from thumbnail)
+                const postImageDiv = bodyDoc.querySelector('.post-image');
                 if (postImageDiv) {
-                    // video poster (skip "nil" literal Kittygram uses when there is none)
-                    var videoEl = postImageDiv.querySelector('video');
+                    const videoEl = postImageDiv.querySelector('video');
                     if (videoEl) {
-                        var posterAttr = videoEl.getAttribute('poster');
-                        if (posterAttr && posterAttr !== 'nil') thumbnail = decodeKittygramProxy(posterAttr);
+                        const widthAttr = videoEl.getAttribute('width');
+                        const heightAttr = videoEl.getAttribute('height');
+                        if (widthAttr) videoWidth = parseInt(widthAttr, 10);
+                        if (heightAttr) videoHeight = parseInt(heightAttr, 10);
                     }
-                    // photo post: <img> directly inside .post-image
-                    if (!thumbnail) {
-                        var imgEl = postImageDiv.querySelector('img');
-                        if (imgEl) {
-                            var srcAttr = imgEl.getAttribute('src');
-                            if (srcAttr && srcAttr !== 'nil') thumbnail = decodeKittygramProxy(srcAttr);
-                        }
+                    // Extract all images from carousel gallery (multi-image posts)
+                    const carousel = postImageDiv.querySelector('.carousel');
+                    if (carousel) {
+                        const imgs = carousel.querySelectorAll('img');
+                        imgs.forEach(function(img) {
+                            const src = img.getAttribute('src');
+                            if (src && src !== 'nil') {
+                                const decoded = decodeKittygramProxy(src);
+                                if (decoded)
+                                    images.push(decoded);
+                            }
+                        });
                     }
                 }
-                log('fetchKittygramPostData: thumbnail=' + (thumbnail ? thumbnail.substring(0, 60) + '...' : 'none'));
 
-                // Caption: class="post-caption-text"
-                var captionMatch = body.match(/class="post-caption-text"[^>]*>([\s\S]*?)<\/p>/);
+                const captionMatch = body.match(/class="post-caption-text"[^>]*>([\s\S]*?)<\/p>/);
                 if (captionMatch) {
-                    caption = captionMatch[1].replace(/&#039;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/<[^>]+>/g, '').trim();
+                    caption = captionMatch[1]
+                        .replace(/&#039;/g, "'").replace(/&amp;/g, '&')
+                        .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+                        .replace(/<[^>]+>/g, '').trim();
                 }
 
-                // Author: class="username" inside .user-info
-                var authorMatch = body.match(/class="user-info"[\s\S]*?class="username"[^>]*>([^<]+)/);
-                if (authorMatch) author = authorMatch[1].trim();
+                const authorMatch = body.match(/class="user-info"[\s\S]*?class="username"[^>]*>([^<]+)/);
+                if (authorMatch)
+                   author = authorMatch[1].trim();
 
-                // Author thumbnail: <header class="user-info"><img src="...">
-                var authorThumbMatch = body.match(/class="user-info"[\s\S]*?<img\s[^>]*src="(\/mediaproxy\?url=[^"]+)"/);
-                var authorThumb = '';
-                if (authorThumbMatch) {
-                    authorThumb = decodeKittygramProxy(authorThumbMatch[1]);
-                }
+                const authorThumbMatch = body.match(/class="user-info"[\s\S]*?<img\s[^>]*src="(\/mediaproxy\?url=[^"]+)"/);
+                const authorThumb = authorThumbMatch ? decodeKittygramProxy(authorThumbMatch[1]) : '';
 
-                // Datetime: read from <time class="post-time" datetime="YYYY-MM-DDTHH:MM:SS">
-                var timeEl = bodyDoc.querySelector('time.post-time');
+                const timeEl = bodyDoc.querySelector('time.post-time');
                 if (timeEl) {
-                    var dtAttr = timeEl.getAttribute('datetime');
-                    if (dtAttr) {
-                        datetime = parseDatetimeToUnix(dtAttr);
-                        log('fetchKittygramPostData: parsed datetime=' + datetime + ' from datetime attr "' + dtAttr + '"');
-                    }
+                    const dt = timeEl.getAttribute('datetime');
+                    if (dt)
+                       datetime = parseDatetimeToUnix(dt);
                 }
                 if (!datetime) {
-                    // Fallback: scrape "Posted at: YYYY-MM-DD HH:MM:SS" from text
-                    var timeMatch = body.match(/Posted at:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
-                    if (timeMatch) {
-                        datetime = parseDatetimeToUnix(timeMatch[1]);
-                        log('fetchKittygramPostData: parsed datetime=' + datetime + ' from text fallback "' + timeMatch[1] + '"');
-                    }
+                    const timeMatch = body.match(/Posted at:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+                    if (timeMatch)
+                       datetime = parseDatetimeToUnix(timeMatch[1]);
                 }
 
-                // Likes: use domParser to extract like count - handle "nil likes" (hidden count)
-                var likes = null;
-                var postDoc = domParser.parseFromString(body, 'text/html');
-                var likesEl = postDoc.querySelector('.post-likes');
-                if (likesEl) {
-                    var likesText = likesEl.textContent || '';
-                    log('fetchKittygramPostData: .post-likes text="' + likesText.trim() + '"');
-                    if (likesText.toLowerCase().indexOf('nil') === -1) {
-                        var likesMatch = likesText.match(/([\d,]+)/);
-                        if (likesMatch) {
-                            var likesNum = parseInt(likesMatch[1].replace(/,/g, ''), 10);
-                            if (!isNaN(likesNum)) likes = likesNum;
-                        }
-                    }
-                } else {
-                    // Fallback: scan full body text
-                    var bodyText = postDoc.body ? postDoc.body.textContent : '';
+                let likes = extractLikes(bodyDoc);
+                if (likes == null) {
+                    const bodyText = bodyDoc.body ? bodyDoc.body.textContent : '';
                     if (bodyText.toLowerCase().indexOf('nil likes') === -1) {
-                        var likesMatch2 = bodyText.match(/([\d,]+)\s*likes?/i);
+                        const likesMatch2 = bodyText.match(/([\d,]+)\s*likes?/i);
                         if (likesMatch2) {
-                            var likesNum2 = parseInt(likesMatch2[1].replace(/,/g, ''), 10);
-                            if (!isNaN(likesNum2)) likes = likesNum2;
+                            const likesNum2 = parseInt(likesMatch2[1].replace(/,/g, ''), 10);
+                            if (!isNaN(likesNum2))
+                               likes = likesNum2;
                         }
                     }
                 }
-                log('fetchKittygramPostData: extracted likes=' + (likes !== null ? likes : 'nil/null'));
 
-                if (videoUrl || thumbnail) {
-                    log('fetchKittygramPostData: found videoUrl=' + (videoUrl ? 'yes' : 'no') + ' thumb=' + (thumbnail ? 'yes' : 'no') + ' likes=' + (likes ? likes : 'none') + ' duration=' + (duration ? duration : 'none') + ' from ' + instance);
-                    result = { videoUrl: videoUrl, thumbnail: thumbnail, caption: caption, author: author, authorThumb: authorThumb, datetime: datetime, likes: likes, duration: duration };
+                if (videoUrl || thumbnail || images.length > 0) {
+                    result = { videoUrl: videoUrl, thumbnail: thumbnail, images: images, caption: caption, author: author, authorThumb: authorThumb, datetime: datetime, likes: likes, duration: duration, width: videoWidth, height: videoHeight, codec: videoCodec };
+
+                    // Cache raw HTML for getCommentsPager reuse
+                    pageHtmlCache[shortcode] = body;
+
+                    // Cache thumbnail and likes for cross-call reuse (e.g., getChannelContentPager)
+                    if (thumbnail) thumbnailCache[shortcode] = thumbnail;
+                    if (likes != null) likesCache[shortcode] = likes;
+
                     return true;
                 }
-            } else if (resp) {
-                log('fetchKittygramPostData: ' + instance + ' code=' + resp.code);
             }
-        } catch (e) {
-            log('fetchKittygramPostData: ' + instance + ' error: ' + e);
-        }
+        } catch {}
         return false;
     });
 
-    if (result) return result;
-    return { videoUrl: null, thumbnail: null, caption: null, author: null, authorThumb: '', datetime: null, likes: null, duration: null };
-}
+    // Channel page fallback: Kittygram reels often have poster="nil", so the post
+    // page returns no thumbnail. Fetch the author's channel page and scan for a
+    // matching post card to extract thumbnail and likes.
+    if (result && (!result.thumbnail || result.likes == null) && result.author) {
+        // Check caches first (may have been populated by getChannelContentPager)
+        if (!result.thumbnail && thumbnailCache[shortcode])
+            result.thumbnail = thumbnailCache[shortcode];
+        if (result.likes == null && likesCache[shortcode] != null)
+            result.likes = likesCache[shortcode];
 
-/**
- * Fetches and parses all available metadata for a post/reel.
- * Tries Kittygram, Instagram page meta tags, LD+JSON, __a=1, and web_profile_info fallback.
- * @param {string} shortcode - Post/reel shortcode
- * @param {string} stringUrl - Original URL string
- * @param {boolean} isReel - Whether this is a reel URL
- * @returns {Object} { title, description, thumbnail, authorName, authorThumb, datetime, likes, duration, videoUrl }
- */
-function fetchContentMetadata(shortcode, stringUrl, isReel) {
-    var title = 'Instagram Post';
-    var description = '';
-    var thumbnail = '';
-    var authorName = 'Unknown';
-    var authorThumb = '';
-    var datetime = null;
-    var likes = null;
-    var duration = null;
-    var videoUrl = null;
-
-    // Try Kittygram first
-    try {
-        var kgPost = fetchKittygramPostData(shortcode);
-        if (kgPost.videoUrl) {
-            videoUrl = kgPost.videoUrl;
-        }
-        if (kgPost.thumbnail) thumbnail = kgPost.thumbnail;
-        if (kgPost.caption) {
-            title = kgPost.caption.substring(0, 100);
-            description = kgPost.caption;
-        }
-        if (kgPost.author) authorName = kgPost.author;
-        if (kgPost.datetime) datetime = kgPost.datetime;
-        if (kgPost.likes) likes = kgPost.likes;
-        if (kgPost.duration) duration = kgPost.duration;
-        if (kgPost.authorThumb) authorThumb = kgPost.authorThumb;
-
-        // Kittygram reels have poster="nil" — fetch channel page for thumbnail/likes
-        if ((!thumbnail || !likes) && authorName && videoUrl) {
-            var kgHeaders = { 'User-Agent': USER_AGENT, 'Sec-Fetch-Mode': 'navigate' };
-            var instances = getKittygramInstances();
-            for (var i = 0; i < instances.length; i++) {
-                var channelUrl = instances[i] + '/' + authorName;
-                var channelResp = http.GET(channelUrl, kgHeaders, false);
-                if (channelResp && channelResp.isOk && channelResp.body) {
-                    var channelDoc = domParser.parseFromString(channelResp.body, 'text/html');
-                    var allCards = channelDoc.querySelectorAll('.item-card.post');
-                    for (var c = 0; c < allCards.length; c++) {
-                        var card = allCards[c];
-                        var linkInCard = card.querySelector('a[href="/p/' + shortcode + '"]');
-                        if (linkInCard) {
-                            if (!thumbnail) {
-                                var cardVideo = card.querySelector('.post-image video');
-                                if (cardVideo) {
-                                    var poster = cardVideo.getAttribute('poster');
-                                    if (poster && poster !== 'nil') thumbnail = decodeKittygramProxy(poster);
-                                }
-                                if (!thumbnail) {
-                                    var cardImg = card.querySelector('.post-image img');
-                                    if (cardImg) {
-                                        var src = cardImg.getAttribute('src');
-                                        if (src && src !== 'nil') thumbnail = decodeKittygramProxy(src);
-                                    }
-                                }
-                            }
-                            if (!likes) {
-                                var cardLikesEl = card.querySelector('.post-likes');
-                                if (cardLikesEl) {
-                                    var likesText = cardLikesEl.textContent || '';
-                                    if (likesText.toLowerCase().indexOf('nil') === -1) {
-                                        var likesMatch = likesText.match(/([\d,]+)/);
-                                        if (likesMatch) {
-                                            var likesNum = parseInt(likesMatch[1].replace(/,/g, ''), 10);
-                                            if (!isNaN(likesNum)) likes = likesNum;
-                                        }
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    } catch (e) {
-        log('fetchContentMetadata: Kittygram error: ' + e);
-    }
-
-    // If Kittygram gave us a video URL, return immediately
-    if (videoUrl) {
-        return { title: title, description: description, thumbnail: thumbnail, authorName: authorName, authorThumb: authorThumb, datetime: datetime, likes: likes, duration: duration, videoUrl: videoUrl, source: 'kittygram' };
-    }
-
-    // Try Instagram page
-    getSession();
-    var pageUrl = API_URLS.base + (isReel ? '/reel/' : '/p/') + shortcode + '/';
-    var pageResp = http.GET(pageUrl, defaultHeaders(), false);
-
-    if (pageResp && pageResp.isOk && pageResp.body) {
-        var meta = extractMetaTags(pageResp.body);
-        if (meta) {
-            if (meta.title && meta.title !== 'Instagram') title = meta.title;
-            if (meta.description) description = meta.description;
-            if (meta.image) thumbnail = meta.image;
-        }
-        if (!meta || !meta.image || meta.title === 'Instagram') {
-            var htmlMeta = extractPostMetadataFromHtml(pageResp.body, shortcode);
-            if (htmlMeta) {
-                if (htmlMeta.title) title = htmlMeta.title;
-                if (htmlMeta.description) description = htmlMeta.description;
-                if (htmlMeta.thumbnail) thumbnail = htmlMeta.thumbnail;
-                if (htmlMeta.author) authorName = htmlMeta.author;
-                if (htmlMeta.datetime) datetime = htmlMeta.datetime;
-            }
-        }
-
-        var authorMatch = title.match(/^([^|]+?)\s+on\s+Instagram/);
-        if (authorMatch) authorName = authorMatch[1].trim();
-
-        // LD+JSON extraction
-        var ldVideoData = null;
-        try {
-            var ldDoc = domParser.parseFromString(pageResp.body, 'text/html');
-            var ldScripts = ldDoc.querySelectorAll('script[type="application/ld+json"]');
-            for (var si = 0; si < ldScripts.length; si++) {
-                var ldData = JSON.parse(ldScripts[si].textContent);
-                var ldItems = Array.isArray(ldData) ? ldData : [ldData];
-                for (var li = 0; li < ldItems.length; li++) {
-                    if (ldItems[li]['@type'] === 'ImageObject' && ldItems[li].contentUrl && thumbnail.indexOf(ldItems[li].contentUrl) === -1) {
-                        // note: we don't push to an array here, just capture for later
-                    }
-                    if (ldItems[li].author && ldItems[li].author.name) authorName = ldItems[li].author.name;
-                    if (ldItems[li]['@type'] === 'VideoObject' || (Array.isArray(ldItems[li]['@type']) && ldItems[li]['@type'].includes('VideoObject'))) {
-                        ldVideoData = ldItems[li];
-                    }
-                }
-            }
-        } catch {}
-
-        if (ldVideoData) {
-            if (ldVideoData.author && ldVideoData.author.name) authorName = ldVideoData.author.name;
-            if (ldVideoData.uploadDate) {
-                var ldDatetime = parseDatetimeToUnix(ldVideoData.uploadDate);
-                if (ldDatetime) datetime = ldDatetime;
-            }
-            if (ldVideoData.thumbnailUrl && !thumbnail) thumbnail = ldVideoData.thumbnailUrl;
-            if (ldVideoData.description && !description) description = ldVideoData.description;
-        }
-    }
-
-    // Fetch video URL
-    videoUrl = fetchVideoUrl(shortcode);
-
-    // Fallback: web_profile_info lookup
-    if (!videoUrl) {
-        var usernameFromUrl = null;
-        try {
-            var pathSegments = new URL(stringUrl).pathname.replace(/\/$/, '').split('/').filter(Boolean);
-            if (pathSegments.length >= 3) usernameFromUrl = pathSegments[0];
-        } catch {}
-        if (usernameFromUrl) {
+        if (!result.thumbnail || result.likes == null) {
             try {
-                var fbSession = getSession();
-                if (fbSession.lsd && fbSession.mid) {
-                    var profileData = fetchWebProfile(usernameFromUrl, fbSession);
-                    if (profileData && profileData.data && profileData.data.user) {
-                        var userObj = profileData.data.user;
-                        var mediaSources = [userObj.edge_owner_to_timeline_media, userObj.edge_felix_video_timeline];
-                        for (var si = 0; si < mediaSources.length && !videoUrl; si++) {
-                            var conn = mediaSources[si];
-                            if (conn && conn.edges) {
-                                for (var ei = 0; ei < conn.edges.length; ei++) {
-                                    var node = conn.edges[ei].node;
-                                    if (node && node.shortcode === shortcode && node.video_versions && node.video_versions.length > 0) {
-                                        videoUrl = node.video_versions[0].url;
-                                        videoUrlCache[shortcode] = videoUrl;
-                                        if (node.owner && node.owner.username) authorName = node.owner.username;
-                                        if (node.taken_at_timestamp) datetime = node.taken_at_timestamp;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                const kgResult = fetchFromKittygram(result.author);
+                if (kgResult && kgResult.items) {
+                    for (let i = 0; i < kgResult.items.length; i++) {
+                        const item = kgResult.items[i];
+                        if (item.code !== shortcode) continue;
+                        if (!result.thumbnail && item.thumbnail)
+                            result.thumbnail = item.thumbnail;
+                        if (result.likes == null && item.likes != null)
+                            result.likes = item.likes;
+                        break;
                     }
+                    if (result.thumbnail) thumbnailCache[shortcode] = result.thumbnail;
+                    if (result.likes != null) likesCache[shortcode] = result.likes;
                 }
             } catch (e) {
-                log('fetchContentMetadata: web_profile_info fallback error: ' + e);
+                log('fetchKittygramPostData: channel fallback error: ' + e);
             }
         }
     }
 
-    // __a=1 metadata retry
-    if (videoUrl && (!thumbnail || thumbnail === platform.icon || title === 'Instagram Post')) {
-        try {
-            var a1Url = API_URLS.base + (isReel ? '/reel/' : '/p/') + shortcode + '/?__a=1';
-            var a1Resp = http.GET(a1Url, defaultHeaders(), false);
-            if (a1Resp && a1Resp.isOk && a1Resp.body) {
-                var a1Meta = extractPostMetadataFromHtml(a1Resp.body, shortcode);
-                if (a1Meta) {
-                    if (a1Meta.title && (title === 'Instagram Post' || !title)) title = a1Meta.title;
-                    if (a1Meta.thumbnail && (!thumbnail || thumbnail === platform.icon)) thumbnail = a1Meta.thumbnail;
-                    if (a1Meta.author && authorName === 'Unknown') authorName = a1Meta.author;
-                    if (a1Meta.datetime && !datetime) datetime = a1Meta.datetime;
-                    if (a1Meta.description && !description) description = a1Meta.description;
-                }
-            }
-        } catch (e) {
-            log('fetchContentMetadata: __a=1 metadata error: ' + e);
-        }
-    }
-
-    log('fetchContentMetadata: using Instagram data ' + videoUrl);
-    return { title: title, description: description, thumbnail: thumbnail, authorName: authorName, authorThumb: authorThumb, datetime: datetime, likes: likes, duration: duration, videoUrl: videoUrl, source: 'instagram' };
+    return result || { videoUrl: null, thumbnail: null, images: [], caption: null, author: null, authorThumb: '', datetime: null, likes: null, duration: null, width: null, height: null, codec: null };
 }
 
 /**
- * Fetches a user's media feed via Instagram's web API.
- * Tries multiple endpoints to handle rate limiting.
- * Returns a list of items with shortcodes, caption, thumbnail URLs, etc.
- * @param {string} userId - Numeric Instagram user ID
- * @param {Object} session - Session object with lsd and mid
- * @returns {Object|null} Parsed JSON response, or null
- */
-function fetchUserFeed(userId, session, cursor) {
-    // Primary endpoint: feed/user
-    var endpoints = [];
-    // Use fewer items per page to reduce rate limiting
-    var baseUrl = '/api/v1/feed/user/' + userId + '/?count=12';
-    if (cursor) baseUrl += '&max_id=' + encodeURIComponent(cursor);
-    endpoints.push(baseUrl);
-    // Alternative: reel media tray (may return different rate limit bucket)
-    endpoints.push('/api/v1/feed/user/' + userId + '/reel_media/');
-    // Try with media info endpoint for just the user's media count
-    endpoints.push('/api/v1/users/' + userId + '/full_detail_info/');
-
-    for (var e = 0; e < endpoints.length; e++) {
-        var url = API_URLS.base + endpoints[e];
-        log('fetchUserFeed: trying ' + endpoints[e]);
-
-        try {
-            var headers = apiHeaders(session.lsd, session.mid);
-            var resp = http.GET(url, headers, false);
-            if (resp && resp.body) {
-                log('fetchUserFeed: code=' + resp.code + ' length=' + resp.body.length);
-                if (resp.isOk) {
-                    var parsed = tryParse(resp.body);
-                    if (parsed) {
-                        log('fetchUserFeed: parsed keys=' + Object.keys(parsed).join(', '));
-                        if (parsed.items) log('fetchUserFeed: found ' + parsed.items.length + ' items');
-                        // Return response with pagination metadata
-                        return {
-                            items: parsed.items || [],
-                            hasMore: parsed.more_available === true,
-                            nextCursor: parsed.next_max_id || null,
-                            raw: parsed
-                        };
-                    }
-                } else if (resp.code === 401) {
-                    log('fetchUserFeed: 401 (needs login sessionid cookie)');
-                } else {
-                    log('fetchUserFeed: first 300=' + resp.body.substring(0, 300));
-                }
-            }
-        } catch (e) {
-            log('fetchUserFeed: error: ' + e);
-        }
-    }
-
-    log('fetchUserFeed: all endpoints failed');
-    return { items: [], hasMore: false, nextCursor: null };
-}
-
-/**
- * Makes a GraphQL POST query to Instagram's API.
- * Tries http.POST first, then http.requestWithBody fallback.
- * @param {string} queryHash - The query hash for the desired operation
- * @param {Object} variables - Variables to pass to the query
- * @param {string} lsd - LSD token
- * @param {string} mid - Mid cookie value
- * @returns {Object|null} Parsed JSON response, or null
- */
-function graphqlQuery(queryHash, variables, lsd, mid) {
-    var url = API_URLS.base + API_URLS.graphql;
-    var body = 'query_hash=' + queryHash + '&variables=' + encodeURIComponent(JSON.stringify(variables));
-    var headers = apiHeaders(lsd, mid);
-    headers['Content-Type'] = 'application/x-www-form-urlencoded';
-    log('graphqlQuery: hash=' + queryHash.substring(0, 8) + '... url=' + url);
-
-    // Try POST with correct signature: http.POST(url, body, headers, useAuthClient)
-    try {
-        log('graphqlQuery: trying POST');
-        var resp = http.POST(url, body, headers, false);
-        if (resp && resp.body) {
-            log('graphqlQuery: POST code=' + resp.code + ' length=' + resp.body.length);
-            if (resp.body) log('graphqlQuery: POST first 200=' + resp.body.substring(0, 200));
-            if (resp.isOk) {
-                var parsed = tryParse(resp.body);
-                if (parsed) return parsed;
-            }
-        }
-    } catch (e) {
-        log('graphqlQuery: POST error: ' + e);
-    }
-
-    // Fallback: http.requestWithBody(method, url, body, headers, useAuthClient)
-    try {
-        log('graphqlQuery: trying requestWithBody');
-        var resp = http.requestWithBody("POST", url, body, headers, false);
-        if (resp && resp.body) {
-            log('graphqlQuery: requestWithBody code=' + resp.code + ' length=' + resp.body.length);
-            if (resp.isOk) {
-                var parsed = tryParse(resp.body);
-                if (parsed) return parsed;
-            }
-        }
-    } catch (e) {
-        log('graphqlQuery: requestWithBody error: ' + e);
-    }
-
-    log('graphqlQuery: all strategies failed');
-    return null;
-}
-
-/**
- * Fetches feed items for a user, trying multiple strategies in order:
- * 1. __a=1&__d=dis (HTTP 201 HTML with embedded JSON)
- * 2. web_profile_info GET/POST
- * 3. Mobile API (i.instagram.com)
- * 4. fetchUserFeed (rate-limited fallback)
- * Returns items with shortcodes, captions, thumbnails, and video URL caches.
- * @param {string} username - Instagram username
- * @param {string|null} cursor - Pagination cursor
- * @returns {{items: Array, hasMore: boolean, nextCursor: string|null}}
- */
-function fetchFeedItems(username, cursor) {
-    log('fetchFeedItems: username=' + username + ' cursor=' + (cursor || 'null'));
-    var session = getSession();
-    if (!session.lsd) {
-        log('fetchFeedItems: no lsd token, continuing with cookie-only fallbacks');
-        session.lsd = session.lsd || '';
-        session.mid = session.mid || '';
-    }
-
-    // Try __a=1&__d=dis with browser-like headers first (not rate-limited like web_profile_info)
-    if (!cursor) {
-        // Try __a=1&__d=dis with browser-like headers
-        var disVariants = [
-            { label: 'browser-headers', headers: (function() { var h = defaultHeaders(); h['Accept'] = 'application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'; return h; })() },
-            { label: 'browser+lsd', headers: (function() { var h = defaultHeaders(); h['Accept'] = 'application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'; if (session.lsd) h['x-fb-lsd'] = session.lsd; return h; })() },
-            { label: 'api-headers', headers: (function() { var h = apiHeaders(session.lsd || '', session.mid || ''); h['Accept'] = 'application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'; return h; })() }
-        ];
-        for (var dv = 0; dv < disVariants.length; dv++) {
-            try {
-                var disUrl = API_URLS.base + '/' + encodeURIComponent(username) + '/?__a=1&__d=dis';
-                log('fetchFeedItems: trying __a=1&__d=dis with ' + disVariants[dv].label);
-                var disResp = http.GET(disUrl, disVariants[dv].headers, false);
-                if (disResp) {
-                    log('fetchFeedItems: __a=1&__d=dis ' + disVariants[dv].label + ' code=' + disResp.code + ' len=' + (disResp.body ? disResp.body.length : 0));
-                    if (disResp.isOk && disResp.body) {
-                        var disData = tryParse(disResp.body);
-                        if (disData) {
-                            log('fetchFeedItems: __a=1&__d=dis parsed keys=' + Object.keys(disData).join(','));
-                            var graphUser = null;
-                            try { graphUser = disData.graphql && disData.graphql.user; } catch {}
-                            try { if (!graphUser) graphUser = disData.data && disData.data.user; } catch {}
-                            if (graphUser) {
-                                var sources = [
-                                    { name: 'timeline', data: graphUser.edge_owner_to_timeline_media },
-                                    { name: 'reels', data: graphUser.edge_felix_video_timeline }
-                                ];
-                                for (var si = 0; si < sources.length; si++) {
-                                    var conn = sources[si].data;
-                                    if (conn && conn.edges && conn.edges.length > 0) {
-                                        log('fetchFeedItems: __a=1&__d=dis found ' + conn.edges.length + ' ' + sources[si].name + ' edges');
-                                        var items = [];
-                                        for (var ei = 0; ei < conn.edges.length; ei++) {
-                                            var node = conn.edges[ei].node;
-                                            if (!node || !node.shortcode) continue;
-                                            var isReel = node.media_type === 2 || node.product_type === 'clips' || node.__typename === 'XDTGraphVideo';
-                                            var isVideo = node.is_video || (node.video_versions && node.video_versions.length > 0) || node.video_duration;
-                                            items.push({
-                                                code: node.shortcode,
-                                                id: node.id,
-                                                taken_at: node.taken_at_timestamp,
-                                                video_versions: node.video_versions || null,
-                                                image_versions2: node.thumbnail_resources ? { candidates: node.thumbnail_resources } : null,
-                                                caption: node.edge_media_to_caption && node.edge_media_to_caption.edges && node.edge_media_to_caption.edges[0] ? { text: node.edge_media_to_caption.edges[0].node.text } : null,
-                                                product_type: isReel ? 'clips' : (isVideo ? 'feed' : null),
-                                                video_duration: node.video_duration || null
-                                            });
-                                        }
-                                        var hasMore = conn.page_info ? conn.page_info.has_next_page : false;
-                                        var nextCursor = conn.page_info ? conn.page_info.end_cursor : null;
-                                        return { items: items, hasMore: hasMore, nextCursor: nextCursor };
-                                    }
-                                }
-                            }
-                        } else if (disResp.body) {
-                            log('fetchFeedItems: __a=1&__d=dis body preview=' + disResp.body.substring(0, 300));
-                        }
-                    }
-                }
-            } catch (e) {
-                log('fetchFeedItems: __a=1&__d=dis ' + disVariants[dv].label + ' error: ' + e);
-            }
-        }
-    }
-
-    // Get user profile data (includes edge_owner_to_timeline_media with recent posts)
-    // Note: web_profile_info often returns 401 in 2024+ (requires sessionid cookie).
-    // This is NOT a session issue — don't clear the session and retry, as it will
-    // still return 401. Just try once more with whatever session we have.
-    var userData = fetchWebProfile(username, session);
-    if (!userData) {
-        log('fetchFeedItems: web_profile_info failed, continuing with fallbacks');
-    }
-    // Refresh session (set midCookie from cookieStore) but don't clear anything
-    if (!userData && (!lsdToken || !midCookie)) {
-        session = getSession();
-    }
-
-    var userObj = null;
-    if (userData) {
-        try { userObj = userData.data.user; } catch {}
-    }
-    if (!userObj) {
-        log('fetchFeedItems: no user object, will try mobile API fallback');
-    }
-
-    var userId = userObj ? userObj.id : null;
-
-    // Try to extract items from web_profile_info's edge_owner_to_timeline_media
-    // This bypasses the rate-limited feed API because web_profile_info has a different rate limit
-    if (userObj && !cursor && userObj.edge_owner_to_timeline_media && userObj.edge_owner_to_timeline_media.edges) {
-        var graphEdges = userObj.edge_owner_to_timeline_media.edges;
-        log('fetchFeedItems: web_profile_info has ' + graphEdges.length + ' timeline edges');
-        var items = [];
-        graphEdges.forEach(function(edge) {
-            var node = edge.node;
-            if (!node || !node.shortcode) return;
-            var isReel = node.media_type === 2 || node.product_type === 'clips' || node.__typename === 'XDTGraphVideo';
-            var isVideo = node.is_video || (node.video_versions && node.video_versions.length > 0) || node.video_duration;
-            items.push({
-                code: node.shortcode,
-                id: node.id,
-                taken_at: node.taken_at_timestamp,
-                video_versions: node.video_versions || null,
-                image_versions2: node.thumbnail_resources ? { candidates: node.thumbnail_resources } : null,
-                display_url: node.display_url || null,
-                thumbnail_src: node.thumbnail_src || null,
-                thumbnail_resources: node.thumbnail_resources || null,
-                caption: node.edge_media_to_caption && node.edge_media_to_caption.edges && node.edge_media_to_caption.edges[0] ? { text: node.edge_media_to_caption.edges[0].node.text } : null,
-                product_type: isReel ? 'clips' : (isVideo ? 'feed' : null),
-                video_duration: node.video_duration || null
-            });
-        });
-        var hasMore = userObj.edge_owner_to_timeline_media.page_info && userObj.edge_owner_to_timeline_media.page_info.has_next_page;
-        var nextCursor = userObj.edge_owner_to_timeline_media.page_info ? userObj.edge_owner_to_timeline_media.page_info.end_cursor : null;
-        log('fetchFeedItems: from timeline: ' + items.length + ' items, hasMore=' + hasMore);
-        return { items: items, hasMore: hasMore, nextCursor: nextCursor };
-    }
-
-    // Fallback: try reel media (clips/reels)
-    if (userObj && !cursor && userObj.edge_felix_video_timeline && userObj.edge_felix_video_timeline.edges) {
-        var reelEdges = userObj.edge_felix_video_timeline.edges;
-        log('fetchFeedItems: web_profile_info has ' + reelEdges.length + ' reel edges');
-        var items = [];
-        reelEdges.forEach(function(edge) {
-            var node = edge.node;
-            if (!node || !node.shortcode) return;
-            items.push({
-                code: node.shortcode,
-                id: node.id,
-                taken_at: node.taken_at_timestamp,
-                video_versions: node.video_versions || null,
-                image_versions2: node.thumbnail_resources ? { candidates: node.thumbnail_resources } : null,
-                caption: node.edge_media_to_caption && node.edge_media_to_caption.edges && node.edge_media_to_caption.edges[0] ? { text: node.edge_media_to_caption.edges[0].node.text } : null,
-                product_type: 'clips',
-                video_duration: node.video_duration || null
-            });
-        });
-        var hasMore = userObj.edge_felix_video_timeline.page_info && userObj.edge_felix_video_timeline.page_info.has_next_page;
-        var nextCursor = userObj.edge_felix_video_timeline.page_info ? userObj.edge_felix_video_timeline.page_info.end_cursor : null;
-        log('fetchFeedItems: from reels: ' + items.length + ' items, hasMore=' + hasMore);
-        return { items: items, hasMore: hasMore, nextCursor: nextCursor };
-    }
-
-    // Mobile API fallback: try i.instagram.com with mobile headers (different rate limit bucket)
-    // Try even when cursor is present for pagination - mobile API uses max_id instead of end_cursor
-    if (!userId || cursor) {
-        try {
-            var mobileUA = 'Instagram 100.0.0.0.100 Android (28/9; 420dpi; 1080x1920; samsung; SM-G975F; beyond2; exynos9820; en_US)';
-            var mobileHeaders = {
-                'User-Agent': mobileUA,
-                'Accept': '*/*',
-                'X-IG-App-ID': IG_APP_ID_ALT,
-                'X-CSRFToken': 'missing',
-            };
-            if (cookieStore) mobileHeaders['Cookie'] = cookieStore;
-            // Try username info endpoint to get user ID if we don't have it yet
-            if (!userId) {
-                var infoUrl = 'https://i.instagram.com/api/v1/users/' + encodeURIComponent(username) + '/usernameinfo/';
-                log('fetchFeedItems: trying mobile API username info');
-                var infoResp = http.GET(infoUrl, mobileHeaders, false);
-                if (infoResp && infoResp.isOk && infoResp.body) {
-                    log('fetchFeedItems: mobile API username info code=' + infoResp.code + ' len=' + infoResp.body.length);
-                    var infoData = tryParse(infoResp.body);
-                    if (infoData && infoData.user && infoData.user.pk) {
-                        userId = infoData.user.pk;
-                        log('fetchFeedItems: mobile API got userId=' + userId);
-                    }
-                } else if (infoResp) {
-                    log('fetchFeedItems: mobile API username info code=' + infoResp.code + ' len=' + (infoResp.body ? infoResp.body.length : 0));
-                }
-            }
-        } catch (e) {
-            log('fetchFeedItems: mobile API info error: ' + e);
-        }
-    }
-
-    // Mobile API feed fallback: try i.instagram.com feed endpoint
-    if (userId && !cursor) {
-        try {
-            var mobileUA = 'Instagram 100.0.0.0.100 Android (28/9; 420dpi; 1080x1920; samsung; SM-G975F; beyond2; exynos9820; en_US)';
-            var feedHeaders = {
-                'User-Agent': mobileUA,
-                'Accept': '*/*',
-                'X-IG-App-ID': IG_APP_ID_ALT,
-                'X-CSRFToken': 'missing',
-            };
-            if (cookieStore) feedHeaders['Cookie'] = cookieStore;
-            var feedUrl = 'https://i.instagram.com/api/v1/feed/user/' + userId + '/?count=12';
-            if (cursor) feedUrl += '&max_id=' + encodeURIComponent(cursor);
-            log('fetchFeedItems: trying mobile API feed' + (cursor ? ' with cursor' : ''));
-            var feedResp = http.GET(feedUrl, feedHeaders, false);
-            if (feedResp && feedResp.isOk && feedResp.body) {
-                var feedData = tryParse(feedResp.body);
-                if (feedData && feedData.items) {
-                    log('fetchFeedItems: mobile API feed got ' + feedData.items.length + ' items');
-                    var items = [];
-                    for (var mi = 0; mi < feedData.items.length; mi++) {
-                        var mitem = feedData.items[mi];
-                        if (!mitem || !mitem.code) continue;
-                        var isReel = mitem.media_type === 2 || mitem.product_type === 'clips';
-                        var isVideo = mitem.is_video || (mitem.video_versions && mitem.video_versions.length > 0) || mitem.video_duration;
-                        items.push({
-                            code: mitem.code,
-                            id: mitem.id || mitem.pk,
-                            taken_at: mitem.taken_at,
-                            video_versions: mitem.video_versions || null,
-                            image_versions2: mitem.image_versions2 || null,
-                            caption: mitem.caption ? { text: mitem.caption.text || '' } : null,
-                            product_type: isReel ? 'clips' : (isVideo ? 'feed' : null),
-                            video_duration: mitem.video_duration || null
-                        });
-                    }
-                    if (items.length > 0) {
-                        return { items: items, hasMore: !!feedData.more_available, nextCursor: feedData.next_max_id || null };
-                    }
-                }
-            } else if (feedResp) {
-                log('fetchFeedItems: mobile API feed code=' + feedResp.code + ' len=' + (feedResp.body ? feedResp.body.length : 0));
-            }
-        } catch (e) {
-            log('fetchFeedItems: mobile API feed error: ' + e);
-        }
-    }
-
-    // Last resort: try the rate-limited feed API
-    if (userId) {
-        var feedResult = fetchUserFeed(userId, session, cursor);
-        if ((!feedResult || !feedResult.items || feedResult.items.length === 0) && (!lsdToken || !midCookie)) {
-            log('fetchFeedItems: session was stale, retrying with fresh session');
-            session = getSession();
-            if (session.lsd && session.mid) {
-                feedResult = fetchUserFeed(userId, session, cursor);
-            }
-        }
-        if (feedResult && feedResult.items) {
-            log('fetchFeedItems: returning ' + feedResult.items.length + ' items, hasMore=' + feedResult.hasMore);
-            return feedResult;
-        }
-    }
-
-    log('fetchFeedItems: no feed source available');
-    return { items: [], hasMore: false, nextCursor: null };
-}
-
-/**
- * Attempts to fetch the direct video URL for a given Instagram shortcode.
- * Tries multiple strategies in order of reliability.
- * @param {string} shortcode - Instagram media shortcode
- * @returns {string|null} Video URL, or null
- */
-function fetchVideoUrl(shortcode) {
-    log('fetchVideoUrl: shortcode=' + shortcode);
-    var session = getSession();
-
-    // Strategy 1: Try the web API media info endpoint for video_versions
-    log('fetchVideoUrl: trying web API media info');
-    if (session.lsd && session.mid) {
-        var mediaUrl = API_URLS.base + '/api/v1/media/' + shortcode + '/info/';
-        var appIdsToTry = [IG_APP_ID, IG_APP_ID_ALT];
-        for (var ai = 0; ai < appIdsToTry.length; ai++) {
-            try {
-                var headers = (appIdsToTry[ai] === IG_APP_ID)
-                    ? apiHeaders(session.lsd, session.mid)
-                    : apiHeadersAlt(session.lsd, session.mid);
-                headers['Referer'] = API_URLS.base + '/p/' + shortcode + '/';
-                log('fetchVideoUrl: media info with appId=' + appIdsToTry[ai].substring(0, 6) + '...');
-                var resp = http.GET(mediaUrl, headers, false);
-                if (resp && resp.isOk && resp.body) {
-                    var parsed = tryParse(resp.body);
-                    if (parsed && parsed.items && parsed.items[0]) {
-                        var item = parsed.items[0];
-                        // Try video_versions array
-                        if (item.video_versions && item.video_versions.length > 0) {
-                            var best = item.video_versions[0];
-                            log('fetchVideoUrl: found via web API video_versions: ' + (best.url || '').substring(0, 60));
-                            return best.url;
-                        }
-                        // Try direct video_url
-                        if (item.video_url) {
-                            log('fetchVideoUrl: found via web API video_url');
-                            return item.video_url;
-                        }
-                    } else {
-                        log('fetchVideoUrl: web API media info - no items in response');
-                    }
-                } else {
-                    log('fetchVideoUrl: web API media info - resp=' + (resp ? resp.code + ' ok=' + resp.isOk + ' bodyLen=' + resp.body.length : 'null'));
-                }
-            } catch (e) {
-                log('fetchVideoUrl: web API media info error with appId=' + appIdsToTry[ai].substring(0, 6) + '...: ' + e);
-            }
-        }
-
-        // Strategy 2: Try the GraphQL API
-        try {
-            log('fetchVideoUrl: trying GraphQL');
-            var mediaData = graphqlQuery(QUERY_HASHES.mediaInfo, { shortcode: shortcode }, session.lsd, session.mid);
-            if (mediaData) {
-                var videoUrl = null;
-                try {
-                    videoUrl = mediaData.data.shortcode_media.video_url;
-                    log('fetchVideoUrl: GraphQL returned video_url=' + (videoUrl ? videoUrl.substring(0, 60) + '...' : 'null'));
-                } catch (e) {
-                    log('fetchVideoUrl: could not extract video_url: ' + e);
-                }
-                if (videoUrl) return videoUrl;
-            } else {
-                log('fetchVideoUrl: GraphQL mediaData is null');
-            }
-        } catch (e) {
-            log('fetchVideoUrl: GraphQL error: ' + e);
-        }
-    } else {
-        log('fetchVideoUrl: no csrftoken');
-    }
-
-    // Strategy 1b: Check video URL cache
-    if (videoUrlCache[shortcode]) {
-        log('fetchVideoUrl: found in cache');
-        return videoUrlCache[shortcode];
-    }
-
-    // Strategy 2: Fetch the post page and look for video data
-    var pageUrl = API_URLS.base + '/p/' + shortcode + '/';
-    var response = null;
-
-    // Try with session headers first for richer data
-    if (session.lsd || session.mid) {
-        var sessionHeaders = apiHeaders(session.lsd || '', session.mid || '');
-        sessionHeaders['Referer'] = pageUrl;
-        response = http.GET(pageUrl, sessionHeaders, false);
-    }
-
-    if (!response || !response.isOk) {
-        response = http.GET(pageUrl, defaultHeaders(), false);
-    }
-
-    // Extract LSD from the post page if we don't have it yet
-    if (response && response.isOk && response.body && !lsdToken) {
-        var pageLsd = extractLsdToken(response.body);
-        if (pageLsd) {
-            lsdToken = pageLsd;
-            log('fetchVideoUrl: found LSD from post page=' + lsdToken.substring(0, 10) + '...');
-            // Retry web API with the newly found LSD
-            if (midCookie) {
-                try {
-                    var mediaUrl = API_URLS.base + '/api/v1/media/' + shortcode + '/info/';
-                    var retryHeaders = apiHeaders(lsdToken, midCookie);
-                    retryHeaders['Referer'] = pageUrl;
-                    var retryResp = http.GET(mediaUrl, retryHeaders, false);
-                    if (retryResp && retryResp.isOk && retryResp.body) {
-                        var retryParsed = tryParse(retryResp.body);
-                        if (retryParsed && retryParsed.items && retryParsed.items[0]) {
-                            var retryItem = retryParsed.items[0];
-                            if (retryItem.video_versions && retryItem.video_versions.length > 0) {
-                                log('fetchVideoUrl: found video via retry with LSD');
-                                return retryItem.video_versions[0].url;
-                            }
-                        }
-                    }
-                } catch (e) {
-                    log('fetchVideoUrl: retry with LSD error: ' + e);
-                }
-            }
-        }
-    }
-
-    if (response && response.isOk) {
-        // Try LD+JSON structured data
-        var ldVideo = extractLdVideo(response.body);
-        if (ldVideo && ldVideo.contentUrl) {
-            log('fetchVideoUrl: found via LD+JSON VideoObject.contentUrl');
-            return ldVideo.contentUrl;
-        }
-
-        // Try extractScreenshotVideo: checks <link rel="preload" as="video"> and og:video meta
-        var screenshotVid = extractScreenshotVideo(response.body);
-        if (screenshotVid && screenshotVid.indexOf('.mp4') !== -1) {
-            log('fetchVideoUrl: found via screenshotVideo preload');
-            return screenshotVid;
-        }
-
-        // Try extracting from __NEXT_DATA__ (Next.js hydration data - used by modern Instagram)
-        var nextDataMatch = response.body.match(/<script id="__NEXT_DATA__"[^>]*type="application\/json"[^>]*>([\s\S]*?)<\/script>/);
-        if (nextDataMatch) {
-            var nextData = tryParse(nextDataMatch[1]);
-            if (nextData) {
-                var vidFromNext = extractVideoUrlFromGraphql(nextData);
-                if (vidFromNext) return vidFromNext;
-                // Also try nested props.pageProps
-                try {
-                    var pageProps = nextData.props && nextData.props.pageProps;
-                    if (pageProps) {
-                        var vidFromProps = extractVideoUrlFromGraphql(pageProps);
-                        if (vidFromProps) return vidFromProps;
-                    }
-                } catch {}
-            }
-        }
-
-        // Try extracting from window.__INITIAL_STATE__ (legacy React app state)
-        var initStateMatch = response.body.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
-        if (initStateMatch) {
-            var initState = tryParse(initStateMatch[1]);
-            if (initState) {
-                var vidFromInit = extractVideoUrlFromGraphql(initState);
-                if (vidFromInit) {
-                    log('fetchVideoUrl: found via __INITIAL_STATE__');
-                    return vidFromInit;
-                }
-            }
-        }
-
-        // Try extracting from window._sharedData (legacy Instagram data)
-        var sharedDataMatch = response.body.match(/window\._sharedData\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
-        if (sharedDataMatch) {
-            var sharedData = tryParse(sharedDataMatch[1]);
-            if (sharedData) {
-                var vidFromShared = extractVideoUrlFromGraphql(sharedData);
-                if (vidFromShared) {
-                    log('fetchVideoUrl: found via _sharedData');
-                    return vidFromShared;
-                }
-            }
-        }
-
-        // Search for CDN video URLs in the page HTML
-        var cdnVideoRegex = /https?:\/\/scontent[^"'\s]*\/v\/[^"'\s]*\.mp4[^"'\s]*/g;
-        var matches = response.body.match(cdnVideoRegex);
-        if (matches && matches.length > 0) {
-            log('fetchVideoUrl: found via CDN regex');
-            return matches[0];
-        }
-
-        // Search for video URLs from a different CDN pattern
-        var cdnVideoRegex2 = /https?:\/\/video[^"'\s]*\.cdninstagram\.com[^"'\s]*/g;
-        var matches2 = response.body.match(cdnVideoRegex2);
-        if (matches2 && matches2.length > 0) return matches2[0];
-
-        // Search for "video_url" in embedded JSON data
-        var videoUrlRegex = /"video_url"\s*:\s*"([^"]+)"/g;
-        var vMatch;
-        while ((vMatch = videoUrlRegex.exec(response.body)) !== null) {
-            var decoded = vMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, '');
-            if (decoded.indexOf('.mp4') !== -1 || decoded.indexOf('cdninstagram') !== -1) {
-                log('fetchVideoUrl: found via video_url regex');
-                return decoded;
-            }
-        }
-    }
-
-    // Strategy 3: Try the legacy __a=1 API endpoint
-    // Instagram returns HTML but the page may have video data in script tags
-    try {
-        var apiUrl = API_URLS.base + '/p/' + shortcode + '/?__a=1';
-        log('fetchVideoUrl: trying __a=1 API: ' + apiUrl);
-        var apiResponse = http.GET(apiUrl, defaultHeaders(), false);
-
-        if (apiResponse && apiResponse.isOk && apiResponse.body) {
-            log('fetchVideoUrl: __a=1 response length=' + apiResponse.body.length);
-            var apiJson = tryParse(apiResponse.body);
-            if (apiJson) {
-                var vidUrl = extractVideoUrlFromGraphql(apiJson);
-                if (vidUrl) {
-                    log('fetchVideoUrl: found via __a=1 JSON');
-                    return vidUrl;
-                }
-            }
-            // Response may be HTML with embedded video data - search for patterns
-            var htmlVid = extractVideoUrlFromHtml(apiResponse.body);
-            if (htmlVid) {
-                log('fetchVideoUrl: found via __a=1 HTML');
-                return htmlVid;
-            }
-        }
-    } catch (e) {
-        log('fetchVideoUrl: __a=1 error: ' + e);
-    }
-
-    // Strategy 3b: Try __a=1&__d=dis with browser-like headers (from drawrowfly/instagram-scraper approach)
-    try {
-        var disUrl = API_URLS.base + '/p/' + shortcode + '/?__a=1&__d=dis';
-        log('fetchVideoUrl: trying __a=1&__d=dis: ' + disUrl);
-        var disHeaders = defaultHeaders();
-        disHeaders['Accept'] = 'application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8';
-        var disResp = http.GET(disUrl, disHeaders, false);
-        if (disResp && disResp.isOk && disResp.body) {
-            log('fetchVideoUrl: __a=1&__d=dis response length=' + disResp.body.length);
-            var disJson = tryParse(disResp.body);
-            if (disJson) {
-                // Try extracting video_url or video_versions from various response structures
-                var vidUrl = extractVideoUrlFromGraphql(disJson);
-                if (!vidUrl) {
-                    try { vidUrl = disJson.graphql && disJson.graphql.shortcode_media && disJson.graphql.shortcode_media.video_url; } catch {}
-                }
-                if (!vidUrl) {
-                    try { vidUrl = disJson.data && disJson.data.shortcode_media && disJson.data.shortcode_media.video_url; } catch {}
-                }
-                if (!vidUrl) {
-                    try {
-                        var item = disJson.items && disJson.items[0];
-                        if (item && item.video_versions && item.video_versions.length > 0) vidUrl = item.video_versions[0].url;
-                    } catch {}
-                }
-                if (vidUrl) {
-                    log('fetchVideoUrl: found via __a=1&__d=dis');
-                    return vidUrl;
-                }
-            }
-            // Try HTML-based extraction
-            var htmlVid = extractVideoUrlFromHtml(disResp.body);
-            if (htmlVid) {
-                log('fetchVideoUrl: found via __a=1&__d=dis HTML');
-                return htmlVid;
-            }
-        }
-    } catch (e) {
-        log('fetchVideoUrl: __a=1&__d=dis error: ' + e);
-    }
-
-    // Strategy 4: Try the embed page (sometimes has media info in lighter format)
-    try {
-        var embedUrl = API_URLS.base + '/p/' + shortcode + '/embed/';
-        log('fetchVideoUrl: trying embed: ' + embedUrl);
-        var embedResp = http.GET(embedUrl, defaultHeaders(), false);
-        if (embedResp && embedResp.isOk && embedResp.body) {
-            // Search for video URL patterns in embed page
-            var embedVidMatch = embedResp.body.match(/"video_url"\s*:\s*"([^"]+)"/);
-            if (embedVidMatch) {
-                var decoded = embedVidMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, '');
-                log('fetchVideoUrl: found via embed video_url');
-                return decoded;
-            }
-            // Search for contentUrl in LD+JSON
-            var embedLd = extractLdVideo(embedResp.body);
-            if (embedLd && embedLd.contentUrl) return embedLd.contentUrl;
-        }
-    } catch (e) {
-        log('fetchVideoUrl: embed error: ' + e);
-    }
-
-    // Strategy 5: Try the Comet GraphQL API endpoint (different from legacy /graphql/query/)
-    try {
-        var cometUrl = API_URLS.base + '/api/graphql/';
-        var cometBody = JSON.stringify({
-            av: '0',
-            __d: 'www',
-            __user: '0',
-            __a: '1',
-            __req: '3',
-            __hs: '19328.HYP:comet_pkg.2.1.0.0.1',
-            dpr: '2',
-            __ccg: 'UNKNOWN',
-            __rev: '0',
-            __s: '4t6xyk:1:1',
-            __hsi: '0',
-            __dyn: '',
-            __csr: '',
-            __comet_req: '1',
-            fb_dtsg: '',
-            jazoest: '',
-            lsd: session.lsd || '',
-            __spin_r: '0',
-            __spin_b: 'trunk',
-            __spin_t: '0',
-            fb_api_caller_class: 'RelayModern',
-            fb_api_req_friendly_name: 'PolarisPostActionLoadPostQuery',
-            variables: JSON.stringify({ shortcode: shortcode }),
-            doc_id: '8847514545173641',
-        });
-        var cometHeaders = apiHeaders(session.lsd || '', session.mid || '');
-        cometHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
-        cometHeaders['Referer'] = API_URLS.base + '/p/' + shortcode + '/';
-        log('fetchVideoUrl: trying Comet GraphQL');
-        var cometResp = http.POST(cometUrl, cometBody, cometHeaders, false);
-        if (cometResp && cometResp.isOk && cometResp.body) {
-            var cometData = tryParse(cometResp.body);
-            if (cometData) {
-                var vidUrl = extractVideoUrlFromGraphql(cometData);
-                if (vidUrl) {
-                    log('fetchVideoUrl: found via Comet GraphQL');
-                    return vidUrl;
-                }
-            }
-        }
-    } catch (e) {
-        log('fetchVideoUrl: Comet GraphQL error: ' + e);
-    }
-
-    // Strategy 6: Try the oEmbed API endpoint
-    try {
-        var oembedUrl = 'https://api.instagram.com/oembed?url=' + encodeURIComponent(API_URLS.base + '/p/' + shortcode + '/') + '&format=json';
-        log('fetchVideoUrl: trying oEmbed: ' + oembedUrl);
-        var oembedResp = http.GET(oembedUrl, defaultHeaders(), false);
-        if (oembedResp && oembedResp.isOk && oembedResp.body) {
-            var oembedData = tryParse(oembedResp.body);
-            if (oembedData && oembedData.thumbnail_url) {
-                // oEmbed doesn't give video URL directly, but try finding it
-                // Check if html contains an iframe/video source
-                if (oembedData.html) {
-                    var htmlVid = oembedData.html.match(/src=["']([^"']+\.mp4[^"']*)["']/);
-                    if (htmlVid) return htmlVid[1];
-                }
-            }
-        }
-    } catch (e) {
-        log('fetchVideoUrl: oEmbed error: ' + e);
-    }
-
-    // Strategy 7: Kittygram fallback — fetches the individual post page from Kittygram
-    try {
-        log('fetchVideoUrl: trying Kittygram post fallback');
-        var kgPost = fetchKittygramPostData(shortcode);
-        if (kgPost && kgPost.videoUrl) {
-            log('fetchVideoUrl: found via Kittygram: ' + kgPost.videoUrl.substring(0, 60) + '...');
-            return kgPost.videoUrl;
-        }
-    } catch (e) {
-        log('fetchVideoUrl: Kittygram error: ' + e);
-    }
-
-    log('fetchVideoUrl: all strategies failed');
-    return null;
-}
-
-/**
- * Attempts to parse a JSON string, handling Instagram's for(;;); security prefix
- * @param {string} str - Response body to parse
- * @returns {Object|null} Parsed JSON object, or null
- */
-function tryParse(str) {
-    try {
-        if (!str || typeof str !== 'string') return null;
-        var cleaned = str;
-        // Instagram sometimes prefixes JSON responses with for(;;); to prevent XSSI
-        if (cleaned.indexOf('for(;;);') === 0) {
-            cleaned = cleaned.substring(8);
-        }
-        return JSON.parse(cleaned);
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Extracts a video URL from various known Instagram API response structures.
- * Navigates GraphQL, mobile API, and legacy API response formats.
- * @param {Object} data - Parsed API response object
- * @returns {string|null} Video URL, or null
- */
-function extractVideoUrlFromGraphql(data) {
-    try {
-        if (!data) return null;
-
-        var sources = [
-            // GraphQL response format: data.shortcode_media.video_url
-            function (d) { return d && d.graphql && d.graphql.shortcode_media && d.graphql.shortcode_media.video_url; },
-            // Mobile API response format: items[0].video_versions[0].url
-            function (d) { return d && d.items && d.items[0] && d.items[0].video_versions && d.items[0].video_versions[0] && d.items[0].video_versions[0].url; },
-            // Mobile API with dash manifest (fallback)
-            function (d) { return d && d.items && d.items[0] && d.items[0].video_dash_manifest; },
-            // Direct GraphQL response (no "graphql" wrapper)
-            function (d) { return d && d.shortcode_media && d.shortcode_media.video_url; }
-        ];
-
-        var foundUrl = null;
-        sources.some(function(fn) {
-            var url = fn(data);
-            if (url && typeof url === 'string' && (url.indexOf('.mp4') !== -1 || url.indexOf('cdninstagram') !== -1)) {
-                foundUrl = url;
-                return true;
-            }
-            return false;
-        });
-
-        return foundUrl;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Extracts video URL from HTML by searching for embedded patterns in script data
- * and raw HTML. Handles Instagram's server-rendered React pages where video data
- * may be embedded in script tags or JavaScript strings.
- * @param {string} html - Raw page HTML (may include JSON in script tags)
- * @returns {string|null} Video URL, or null
- */
-function extractVideoUrlFromHtml(html) {
-    try {
-        if (!html || typeof html !== 'string') return null;
-
-        // Pattern 1: Search for video URLs in LD+JSON script tags
-        try {
-            var ldDoc = domParser.parseFromString(html, 'text/html');
-            var ldScripts = ldDoc.querySelectorAll('script[type="application/ld+json"]');
-            for (var si = 0; si < ldScripts.length; si++) {
-                var ldData = JSON.parse(ldScripts[si].textContent);
-                var ldItems = Array.isArray(ldData) ? ldData : [ldData];
-                for (var li = 0; li < ldItems.length; li++) {
-                    if (ldItems[li]['@type'] === 'VideoObject' || (Array.isArray(ldItems[li]['@type']) && ldItems[li]['@type'].includes('VideoObject'))) {
-                        if (ldItems[li].contentUrl) return ldItems[li].contentUrl;
-                    }
-                }
-            }
-        } catch {}
-
-        // Pattern 2: Search for HTML5 video sources
-        try {
-            var vidDoc = domParser.parseFromString(html, 'text/html');
-            var videoTags = vidDoc.querySelectorAll('video source[src], video[src]');
-            for (var vi = 0; vi < videoTags.length; vi++) {
-                var src = videoTags[vi].getAttribute('src');
-                if (src) {
-                    var decoded = src.replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-                    if (decoded.indexOf('.mp4') !== -1 || decoded.indexOf('cdninstagram') !== -1)
-                        return decoded;
-                }
-            }
-        } catch {}
-
-        // Pattern 3: Regex search for Instagram CDN video URLs in JavaScript strings
-        var videoPatterns = [
-            /"video_url"\s*:\s*"([^"]+)"/g,
-            /"video_versions":\[[^\]]*?"url"\s*:\s*"([^"]+)"/g,
-            /contentUrl"\s*:\s*"([^"]+\.mp4[^"]*)"/g,
-            /"downloadUrl"\s*:\s*"([^"]+)"/g
-        ];
-        for (var pi = 0; pi < videoPatterns.length; pi++) {
-            var match;
-            while ((match = videoPatterns[pi].exec(html)) !== null) {
-                var decoded = match[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-                if (decoded.indexOf('.mp4') !== -1 || decoded.indexOf('cdninstagram') !== -1) {
-                    return decoded;
-                }
-            }
-        }
-
-        // Pattern 4: Search for direct CDN URL patterns in HTML
-        var cdnPatterns = [
-            /https?:\/\/[a-zA-Z0-9.-]*cdninstagram\.com[^"'\s<>]*\.mp4[^"'\s<>]*/g,
-            /https?:\/\/[a-zA-Z0-9.-]*fbcdn\.net[^"'\s<>]*\.mp4[^"'\s<>]*/g,
-            /https?:\/\/[a-zA-Z0-9.-]*scontent\.cdninstagram\.com[^"'\s<>]*\.mp4[^"'\s<>]*/g
-        ];
-        for (var cpi = 0; cpi < cdnPatterns.length; cpi++) {
-            var cdnMatches = html.match(cdnPatterns[cpi]);
-            if (cdnMatches && cdnMatches.length > 0) {
-                var decoded = cdnMatches[0].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-                return decoded;
-            }
-        }
-
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Extracts post metadata from Instagram page HTML by searching for embedded
- * JSON data in script tags and JavaScript strings. Falls back when OG tags
- * and <title> are empty (as is the case with Instagram's skeleton HTML).
- * @param {string} html - Raw page HTML
- * @param {string} shortcode - The post shortcode to match
- * @returns {Object|null} { title, description, thumbnail, author, datetime } or null
- */
-function extractPostMetadataFromHtml(html, shortcode) {
-    try {
-        if (!html || !shortcode) return null;
-        var result = { title: '', description: '', thumbnail: '', author: '', datetime: null };
-        var found = false;
-
-        // Helper to decode escaped JSON strings
-        function decode(str) {
-            return str.replace(/\\u0026/g, '&').replace(/\\\//g, '/').replace(/\\"/g, '"').replace(/\\n/g, ' ');
-        }
-
-        // Search ALL occurrences of the shortcode in the HTML — the first match
-        // might be an <a href> URL context without JSON data nearby. Later matches
-        // in __NEXT_DATA__ or _sharedData script tags have richer embedded data.
-        try {
-            var searchPos = 0;
-            while (true) {
-                var idx = html.indexOf('"' + shortcode + '"', searchPos);
-                if (idx === -1) break;
-                var searchStart = Math.max(0, idx - 8000);
-                var searchEnd = Math.min(html.length, idx + 8000);
-                var context = html.substring(searchStart, searchEnd);
-
-                // Extract caption text from edge_media_to_caption or text fields
-                var captionRegex = /"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-                var capMatch;
-                while ((capMatch = captionRegex.exec(context)) !== null) {
-                    var t = decode(capMatch[1]);
-                    if (t.length > result.title.length && t.indexOf('@') !== 0) {
-                        result.title = t.substring(0, 100);
-                        result.description = t;
-                        found = true;
-                    }
-                }
-
-                // Extract owner username (shorter one near the shortcode)
-                var userRegex = /"username"\s*:\s*"([a-zA-Z0-9_.]+)"/g;
-                var uMatch;
-                while ((uMatch = userRegex.exec(context)) !== null) {
-                    if (uMatch[1].length < 50) {
-                        result.author = uMatch[1];
-                        found = true;
-                    }
-                }
-
-                // Extract display URL (thumbnail)
-                var displayRegex = /"display_url"\s*:\s*"([^"]+)"/g;
-                var dMatch;
-                while ((dMatch = displayRegex.exec(context)) !== null) {
-                    result.thumbnail = decode(dMatch[1]);
-                    found = true;
-                }
-
-                // Extract thumbnail_src
-                var thumbRegex = /"thumbnail_src"\s*:\s*"([^"]+)"/g;
-                var tMatch;
-                while ((tMatch = thumbRegex.exec(context)) !== null) {
-                    if (!result.thumbnail) result.thumbnail = decode(tMatch[1]);
-                    found = true;
-                }
-
-                // Extract timestamp
-                var timeRegex = /"taken_at_timestamp"\s*:\s*(\d+)/g;
-                var timeMatch;
-                while ((timeMatch = timeRegex.exec(context)) !== null) {
-                    result.datetime = parseInt(timeMatch[1]);
-                    found = true;
-                }
-
-                // Try to find full_name near the shortcode context
-                var nameRegex = /"full_name"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-                var nMatch;
-                while ((nMatch = nameRegex.exec(context)) !== null) {
-                    var fn = decode(nMatch[1]).trim();
-                    if (fn && fn.length > 1 && fn.length < 100) {
-                        result.author = fn;
-                        found = true;
-                    }
-                }
-            }
-        } catch {}
-
-        // Fallback: if regex didn't find everything, try LD+JSON script tags
-        if (!found) {
-            try {
-                var ldDoc = domParser.parseFromString(html, 'text/html');
-                var ldScripts = ldDoc.querySelectorAll('script[type="application/ld+json"]');
-                for (var si2 = 0; si2 < ldScripts.length; si2++) {
-                    var ldData = JSON.parse(ldScripts[si2].textContent);
-                    var ldItems = Array.isArray(ldData) ? ldData : [ldData];
-                    for (var li2 = 0; li2 < ldItems.length; li2++) {
-                        var item = ldItems[li2];
-                        if (!result.title && item.description) { result.title = item.description.substring(0, 100); result.description = item.description; found = true; }
-                        if (!result.author && item.author && item.author.name) { result.author = item.author.name; found = true; }
-                        if (!result.thumbnail && (item.thumbnailUrl || item.contentUrl)) { result.thumbnail = item.thumbnailUrl || item.contentUrl; found = true; }
-                        if (!result.datetime && item.datePublished) { try { result.datetime = Math.floor(new Date(item.datePublished).getTime() / 1000); } catch {} found = true; }
-                    }
-                }
-            } catch {}
-        }
-
-        return found ? result : null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Extracts channel metadata from profile page HTML by searching for embedded
- * JSON data. Used as fallback when the web API is rate-limited (401).
- * @param {string} html - Raw page HTML
- * @param {string} username - Channel username for matching
- * @returns {Object|null} { name, thumbnail, subscribers } or null
- */
-function extractChannelMetadataFromHtml(html, username) {
-    try {
-        if (!html || !username) return null;
-        var result = { name: '', thumbnail: '', subscribers: null };
-        var found = false;
-
-        function decode(str) {
-            return str.replace(/\\u0026/g, '&').replace(/\\\//g, '/').replace(/\\"/g, '"').replace(/\\n/g, ' ');
-        }
-
-        // Search near the username in the HTML for surrounding JSON data
-        var idx = html.indexOf('"' + username + '"');
-        if (idx === -1) idx = html.indexOf('/' + username + '/');
-        if (idx !== -1) {
-            var searchStart = Math.max(0, idx - 5000);
-            var searchEnd = Math.min(html.length, idx + 5000);
-            var context = html.substring(searchStart, searchEnd);
-
-            // Extract full_name
-            var nameRegex = /"full_name"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-            var nMatch;
-            while ((nMatch = nameRegex.exec(context)) !== null) {
-                var fn = decode(nMatch[1]).trim();
-                if (fn && fn.length > 1 && fn.length < 100 && fn !== username) {
-                    result.name = fn;
-                    found = true;
-                }
-            }
-
-            // Extract profile pic URL
-            var picRegex = /"profile_pic_url(_hd)?"\s*:\s*"([^"]+)"/g;
-            var pMatch;
-            while ((pMatch = picRegex.exec(context)) !== null) {
-                result.thumbnail = decode(pMatch[2]);
-                found = true;
-            }
-
-            // Extract HD profile pic
-            var hdRegex = /"profile_pic_url_hd"\s*:\s*"([^"]+)"/g;
-            var hMatch;
-            while ((hMatch = hdRegex.exec(context)) !== null) {
-                result.thumbnail = decode(hMatch[1]);
-                found = true;
-            }
-
-            // Extract follower count (from edge_followed_by or follower_count)
-            var followerRegex = /"edge_followed_by"\s*:\s*\{[^}]*?"count"\s*:\s*(\d+)/g;
-            var fMatch;
-            while ((fMatch = followerRegex.exec(context)) !== null) {
-                result.subscribers = parseInt(fMatch[1]);
-                found = true;
-            }
-            if (!result.subscribers) {
-                var countRegex = /"follower_count"\s*:\s*(\d+)/g;
-                var cMatch;
-                while ((cMatch = countRegex.exec(context)) !== null) {
-                    result.subscribers = parseInt(cMatch[1]);
-                    found = true;
-                }
-            }
-
-            // Try biography
-            if (!result.name || !result.thumbnail) {
-                var bioRegex = /"biography"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-                // not used but shows more data is available
-            }
-        }
-
-        if (!result.name) result.name = username;
-        return found ? result : null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Extracts Instagram shortcodes from page HTML using multiple strategies.
- * Searches for URL patterns, JSON keys, and DOM elements containing post/reel IDs.
- * @param {string} html - Raw page HTML
- * @returns {Array} List of unique shortcode strings
- */
-function extractShortcodes(html) {
-    var all = [];
-    var seen = {};
-
-    // Method 1: Scan raw HTML for /p/CODE and /reel/CODE patterns
-    // These appear in JSON data, JS strings, href attributes, or template literals
-    var urlRegex = /(?:\/p\/|\/reel\/)([A-Za-z0-9_-]{11,})(?:\/|"|'|`|\s|\\|>)/g;
-    var match;
-    while ((match = urlRegex.exec(html)) !== null) {
-        var code = match[1];
-        if (!seen[code]) {
-            seen[code] = true;
-            all.push(code);
-        }
-    }
-
-    // Method 2: Search for "code":"XXXXXXXXXXX" patterns (shortened key)
-    var codeRegex = /"code"\s*[:=]\s*"([A-Za-z0-9_-]{11,})"/g;
-    while ((match = codeRegex.exec(html)) !== null) {
-        if (!seen[match[1]]) {
-            seen[match[1]] = true;
-            all.push(match[1]);
-        }
-    }
-
-    // Method 3: Search for "shortcode":"XXXXXXXXXXX" patterns
-    var scRegex = /"shortcode"\s*[:=]\s*"([A-Za-z0-9_-]{11,})"/g;
-    while ((match = scRegex.exec(html)) !== null) {
-        if (!seen[match[1]]) {
-            seen[match[1]] = true;
-            all.push(match[1]);
-        }
-    }
-
-    // Method 4: Find <a href> elements with post/reel URLs via DOM parsing
-    try {
-        var doc = domParser.parseFromString(html, 'text/html');
-        var links = doc.querySelectorAll('a[href]');
-        links.forEach(function(link) {
-            var href = link.getAttribute('href');
-            if (!href) return;
-
-            var hrefMatch = href.match(/\/(?:p|reel)\/([A-Za-z0-9_-]{11,})/);
-            if (hrefMatch && !seen[hrefMatch[1]]) {
-                seen[hrefMatch[1]] = true;
-                all.push(hrefMatch[1]);
-            }
-        });
-    } catch {}
-
-    // Method 5: Search in __NEXT_DATA__ script (Next.js hydration)
-    try {
-        var ndMatch = html.match(/<script id="__NEXT_DATA__"[^>]*type="application\/json"[^>]*>([\s\S]*?)<\/script>/);
-        if (ndMatch) {
-            var ndParsed = JSON.parse(ndMatch[1]);
-            var ndShortcodes = [];
-            // Recursively walk JSON for shortcode fields
-            function walkJson(obj) {
-                if (!obj || typeof obj !== 'object') return;
-                if (Array.isArray(obj)) {
-                    for (var wi = 0; wi < obj.length; wi++) walkJson(obj[wi]);
-                } else {
-                    if (obj.shortcode && typeof obj.shortcode === 'string' && obj.shortcode.length >= 11) ndShortcodes.push(obj.shortcode);
-                    if (obj.code && typeof obj.code === 'string' && obj.code.length >= 11) ndShortcodes.push(obj.code);
-                    var keys = Object.keys(obj);
-                    for (var ki = 0; ki < keys.length; ki++) walkJson(obj[keys[ki]]);
-                }
-            }
-            walkJson(ndParsed);
-            for (var ni = 0; ni < ndShortcodes.length; ni++) {
-                if (!seen[ndShortcodes[ni]]) {
-                    seen[ndShortcodes[ni]] = true;
-                    all.push(ndShortcodes[ni]);
-                }
-            }
-        }
-    } catch {}
-    
-    // Method 6: Search in window._sharedData (legacy page data)
-    try {
-        var sdMatch = html.match(/window\._sharedData\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
-        if (sdMatch) {
-            var sdParsed = JSON.parse(sdMatch[1]);
-            var sdShortcodes = [];
-            function walkSd(obj) {
-                if (!obj || typeof obj !== 'object') return;
-                if (Array.isArray(obj)) {
-                    for (var wi = 0; wi < obj.length; wi++) walkSd(obj[wi]);
-                } else {
-                    if (obj.shortcode && typeof obj.shortcode === 'string' && obj.shortcode.length >= 11) sdShortcodes.push(obj.shortcode);
-                    if (obj.code && typeof obj.code === 'string' && obj.code.length >= 11) sdShortcodes.push(obj.code);
-                    var keys = Object.keys(obj);
-                    for (var ki = 0; ki < keys.length; ki++) walkSd(obj[keys[ki]]);
-                }
-            }
-            walkSd(sdParsed);
-            for (var ni = 0; ni < sdShortcodes.length; ni++) {
-                if (!seen[sdShortcodes[ni]]) {
-                    seen[sdShortcodes[ni]] = true;
-                    all.push(sdShortcodes[ni]);
-                }
-            }
-        }
-    } catch {}
-
-    // Method 7: Search for node.shortcode patterns in minified JS (media edge nodes)
-    try {
-        var nodeRegex = /node\s*:\s*\{[^}]*?shortcode\s*:\s*"([A-Za-z0-9_-]{11,})"/g;
-        var ndMatch;
-        while ((ndMatch = nodeRegex.exec(html)) !== null) {
-            if (!seen[ndMatch[1]]) {
-                seen[ndMatch[1]] = true;
-                all.push(ndMatch[1]);
-            }
-        }
-    } catch {}
-
-    return all;
-}
-
-/**
- * Extracts VideoObject structured data from LD+JSON script tags
- * @param {string} html - Raw page HTML
- * @returns {Object|null} Parsed VideoObject, or null
- */
-function extractLdVideo(html) {
-    try {
-        const doc = domParser.parseFromString(html, 'text/html');
-        const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
-
-        for (const script of scripts) {
-            const data = JSON.parse(script.textContent);
-
-            // Check for VideoObject type (may be a string or array)
-            if (data['@type'] === 'VideoObject' || (Array.isArray(data['@type']) && data['@type'].includes('VideoObject'))) {
-                return data;
-            }
-
-            // Handle LD+JSON arrays (common when multiple objects are embedded)
-            if (Array.isArray(data)) {
-                for (const item of data) {
-                    if (item['@type'] === 'VideoObject' || (Array.isArray(item['@type']) && item['@type'].includes('VideoObject'))) {
-                        return item;
-                    }
-                }
-            }
-        }
-
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Extracts ProfilePage data from LD+JSON script tags
- * @param {string} html - Raw page HTML
- * @returns {Object|null} Object with user sub-object, or null
- */
-function extractLdProfile(html) {
-    try {
-        const doc = domParser.parseFromString(html, 'text/html');
-        const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
-
-        for (const script of scripts) {
-            const data = JSON.parse(script.textContent);
-            const type = data['@type'];
-            const types = Array.isArray(type) ? type : [type];
-
-            if (types.includes('ProfilePage') || types.includes('Person')) {
-                const mainEntity = data.mainEntity || data;
-                if (mainEntity && (mainEntity['@type'] === 'Person' || types.includes('Person'))) {
-                    return {
-                        user: {
-                            id: mainEntity.identifier || '',
-                            username: (mainEntity.alternateName || data.alternateName || data.name || '').toLowerCase(),
-                            full_name: mainEntity.name || data.name || '',
-                            profile_pic_url: (mainEntity.image && mainEntity.image.url) || data.image || '',
-                            biography: mainEntity.description || data.description || ''
-                        }
-                    };
-                }
-            }
-        }
-
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Extracts Open Graph and standard meta tags from an HTML page
- * @param {string} html - Raw page HTML
- * @returns {Object|null} Object with title, description, image, or null
- */
-function extractMetaTags(html) {
-    try {
-        const doc = domParser.parseFromString(html, 'text/html');
-        const metas = doc.querySelectorAll('meta');
-        let title = '';
-        let description = '';
-        let image = '';
-
-        // Extract <title> tag content
-        const titleTag = doc.querySelector('title');
-        if (titleTag) {
-            title = titleTag.textContent || '';
-        }
-
-        // Extract meta property and name attributes
-        for (const meta of metas) {
-            const property = meta.getAttribute('property') || '';
-            const name = meta.getAttribute('name') || '';
-            const content = meta.getAttribute('content') || '';
-
-            if (property === 'og:title' && !title) title = content;
-            if (property === 'og:description' || name === 'description') description = content || description;
-            if (property === 'og:image') image = content || image;
-        }
-
-        if (!title && !description && !image) return null;
-
-        return { title, description, image };
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Searches for video or image URLs in the page HTML.
- * Looks for preload links, og:video meta tags, and og:image as fallback.
- * @param {string} html - Raw page HTML
- * @returns {string|null} URL string, or null
- */
-function extractScreenshotVideo(html) {
-    try {
-        const doc = domParser.parseFromString(html, 'text/html');
-
-        // Look for preloaded video links
-        const links = doc.querySelectorAll('link[rel="preload"][as="video"]');
-        for (const link of links) {
-            const href = link.getAttribute('href');
-            if (href) return href;
-        }
-
-        // Look for og:video meta tag
-        const metaOgVideo = doc.querySelector('meta[property="og:video"]');
-        if (metaOgVideo) {
-            const content = metaOgVideo.getAttribute('content');
-            if (content) return content;
-        }
-
-        // Fall back to og:image
-        const metaOgImage = doc.querySelector('meta[property="og:image"]');
-        if (metaOgImage) {
-            const content = metaOgImage.getAttribute('content');
-            if (content) return content;
-        }
-
-        return null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Parses a URL string into its non-empty path segments.
- * @param {string} url - The URL to parse
- * @returns {string[]|null} Array of path segments, or null if the URL is invalid
+ * Parses a URL into its non-empty path segments.
+ * @param {string} url - Full URL to parse
+ * @returns {string[]|null} Array of path segments, or null on failure
  */
 function urlSegments(url) {
     try {
         return new URL(url).pathname.replace(/\/$/, '').split('/').filter(Boolean);
-    } catch { return null; }
+    } catch { 
+        return null; 
+    }
 }
 
 /**
- * Extracts the username from an Instagram profile URL
- * @param {string} url - Full Instagram URL (e.g. https://www.instagram.com/username/)
- * @returns {string|null} Username, or null
+ * Extracts the username from an Instagram profile URL's first path segment.
+ * @param {string} url - Full Instagram URL
+ * @returns {string|null} Username, or null if unparseable
  */
 function extractUsername(url) {
-    var p = urlSegments(url);
-    return p && p.length > 0 ? p[0] : null;
+    const segments = urlSegments(url);
+    return segments && segments.length > 0 ? segments[0] : null;
 }
 
-/**
- * Parses ISO 8601 duration string (e.g. PT1M30S) into total seconds
- * @param {string} iso - ISO 8601 duration string
- * @returns {number|null} Total seconds, or null
- */
-function parseDurationIso(iso) {
-    if (!iso || typeof iso !== 'string') return null;
-    const match = iso.match(/^PT(?:(\d+)M)?(?:(\d+)S)?$/);
-    if (!match) return null;
-    const minutes = parseInt(match[1]) || 0;
-    const seconds = parseInt(match[2]) || 0;
-    return minutes * 60 + seconds;
-}
 
-/**
- * Parse a "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS" datetime string to a Unix
- * timestamp in seconds WITHOUT relying on new Date(), which may return NaN in some
- * JS engines (e.g. Grayjay's embedded runtime).
- * @param {string} str - datetime string
- * @returns {number|null} Unix seconds, or null if unparseable
- */
-function parseDatetimeToUnix(str) {
-    if (!str || typeof str !== 'string') return null;
-    var m = str.match(/^(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2}):(\d{2})/);
-    if (!m) return null;
-    var year = parseInt(m[1], 10);
-    var month = parseInt(m[2], 10) - 1; // 0-based
-    var day = parseInt(m[3], 10);
-    var hour = parseInt(m[4], 10);
-    var min = parseInt(m[5], 10);
-    var sec = parseInt(m[6], 10);
-    // Days since Unix epoch (1970-01-01) using the proleptic Gregorian calendar
-    var a = Math.floor((14 - (month + 1)) / 12);
-    var y = year + 4800 - a;
-    var mo = (month + 1) + 12 * a - 3;
-    var jdn = day + Math.floor((153 * mo + 2) / 5) + 365 * y + Math.floor(y / 4) - Math.floor(y / 100) + Math.floor(y / 400) - 32045;
-    var unixDays = jdn - 2440588; // JDN of 1970-01-01
-    return unixDays * 86400 + hour * 3600 + min * 60 + sec;
-}
-
-/**
- * Custom CommentPager with pagination support
- */
 class InstagramCommentPager extends CommentPager {
     constructor(results, hasMore, context) {
         super(results, hasMore, context);
@@ -3504,14 +1261,10 @@ class InstagramCommentPager extends CommentPager {
         if (!this.hasMore || !this.context || !this.context.shortcode) {
             return new InstagramCommentPager([], false, this.context);
         }
-        return source.getComments(API_URLS.base + '/p/' + this.context.shortcode + '/');
+        return source.getComments(platform.regular_url + '/p/' + this.context.shortcode + '/');
     }
 }
 
-/**
- * Pagination pager for Instagram channel feeds.
- * Stores cursor context and fetches the next page on demand.
- */
 class InstagramVideoPager extends VideoPager {
     constructor(results, hasMore, context) {
         super(results, hasMore, context);
@@ -3519,7 +1272,7 @@ class InstagramVideoPager extends VideoPager {
 
     nextPage() {
         return source.getChannelContents(
-            API_URLS.base + '/' + encodeURIComponent(this.context.username) + '/',
+            platform.regular_url + '/' + encodeURIComponent(this.context.username) + '/',
             this.context.wantShorts ? Type.Feed.Shorts : Type.Feed.Mixed,
             Type.Order.Chronological,
             null,

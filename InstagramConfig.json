@@ -18,7 +18,7 @@
     "DOMParser"
   ],
   "allowEval": false,
-  "allowAllHttpHeaderAccess": true,
+  "allowAllHttpHeaderAccess": false,
   "allowUrls": [
     "instagram.com",
     ".instagram.com",
@@ -37,6 +37,14 @@
     ],
     "2": [
       "Code restructure & efficiency improvements"
+    ],
+    "3": [
+      "Restructured more code",
+      "Removed accidentally leftover debug throw",
+      "Added sort uploads setting",
+      "Added support for post images",
+      "Added gradient banner to now be used for channels",
+      "Removed dependancy on needing allowAllHttpHeaderAccess"
     ]
   },
   "settings": [
@@ -46,6 +54,13 @@
       "description": "When enabled, share links will use Instagram URLs instead of Kittygram URLs.",
       "type": "Boolean",
       "default": "false"
+    },
+    {
+      "variable": "sortUploads",
+      "name": "Sort Uploads",
+      "description": "When enabled, channel feeds are sorted from newest to oldest (future pages are sorted separately.) Disable for Kittygram's default mixed ordering.",
+      "type": "Boolean",
+      "default": "true"
     },
     {
       "variable": "kittygramInstance",

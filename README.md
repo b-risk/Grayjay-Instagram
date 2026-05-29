@@ -1,9 +1,8 @@
 > [!NOTE]
-> The `allowAllHttpHeaderAccess` permission is currently required to read tbe `Set-Cookie` headers.
+> This plugin works by utilizing [Kittygram instances](https://codeberg.org/irelephant/kittygram), which improves privacy and removes the requirement for login, however that means the plugin is under the same limitations as the instances being used and lots of metadata may not always be available. Direct Instagram support with login could be added in the future but it's unprioritized.
 
 ### Grayjay Instagram
 This plugin adds support for the platform Instagram, allowing you to use it in Grayjay. 
-The plugin works by utilizing [Kittygram](https://codeberg.org/irelephant/kittygram) instances, which improves privacy and doesn't require you to login, at the cost of having the same limitations as Kittygram and thus doesn't have complete metadata parity with the original site.
 
 ### Installation
 You can install the plugin by scanning this QR code:  
@@ -15,8 +14,8 @@ grayjay://plugin/https://raw.githubusercontent.com/b-risk/Grayjay-Instagram/main
 ```
 
 ### Features
-- [x] Reels supported as video shorts
-- [x] Posts support (PlatformPosts)
+- [x] Reels support, videos and shorts
+- [x] Posts support with images
 - [x] Comments support
 - [x] User profiles support as individual channels
 - [x] Channel feeds with reels & posts
